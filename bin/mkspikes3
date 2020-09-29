@@ -1,0 +1,283 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+import numpy as np
+from scipy.signal import convolve, fftconvolve, butter, lfilter, filtfilt
+from uritools import urisplit
+
+# Non-Theano version
+
+# TO DO:  CHECK ON RECORDING 9 - THE GPU VERSION LOOKS WONKY.
+
+# mkspikes populates a database file with spike times and spike basis
+# numbers.  These correspond to the 'spiketimes' and 'spikebasis'
+# tables.  Uses the basis scoring function to localize peaks in the
+# score and mark spikes.
+
+
+# Suspect that non-local memory access patterns due to bit shuffling
+# kill the FFT approach for huge vectors:
+use_fft = False
+
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-basisid', type=int, default=0, help='Basis ID.')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for spike extraction.')
+parser.add_argument('-percent', type=float, default=99, help='Rejection percentage.  Th bottom p% of spikes are rejected.  p=99.5% by default.')
+parser.add_argument('-overlap', default="off", help='If "on", allow overlap in spike windows.')
+parser.add_argument('-filter',  default="100:3000")
+parser.add_argument('-positive', dest='positive', action='store_true', help='If provided, use only positive scores for marking events.')
+parser.add_argument('-plot', default=None, help="If supplied, output file for plotting event score function.")
+parser.add_argument('-rebuild', dest='rebuild', action='store_true', help='If provided, rebuild the db file by resetting all tables.')
+parser.add_argument('-window', type=int, default=1048576, help='Window size in samples for piecewise processing.')
+ns = parser.parse_args()
+
+allow_overlap = (ns.overlap == "on")
+if ns.filter.find(':') == -1:
+    filter = False
+    print( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filter = True
+    [lowstr, highstr] = ns.filter.split(':')
+    lo = float(lowstr)
+    hi = float(highstr)
+    print( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+dbname = ns.files[0]
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+
+samprate, nchannels, uristring = dbobj.get_metadata()
+print( samprate, nchannels, uristring )
+
+if ns.rebuild:
+    # Drop these tables so that they are completely rebuilt:
+    dbobj.drop('spiketimes')
+    dbobj.drop('spikebasis')
+    dbobj.drop('spikecoefs')
+    dbobj.drop('spikelabels')
+
+dbobj.make_spiketimes_table(dbobj)
+dbobj.make_spikebasis_table(dbobj)
+
+dsobj = ndk.ds.open(uristring)
+# smr = urisplit(uristring)
+# recfile = smr.path
+# print(recfile)
+samprate = dsobj.samprate
+t0 = dsobj.t0
+t1 = dsobj.t1
+
+
+# Histogram-based threshold selection: Assumes that "useful" spikes
+# appear only in the top x% of signal values.  This needs to be
+# validated and compared to RMS-error-based threshold selection.
+#
+# 1) Find the min and max values in array
+# 2) Histogram the array
+# 3) Find the threshold that eliminates the given fraction of histogram mass
+#
+def find_threshold(array, nbins, fraction):
+    rmin = array.min()
+    rmax = array.max()
+    hist, edges = np.histogram(array, nbins)
+
+    tot = np.sum(hist)
+    dr = (rmax-rmin) / len(hist)
+
+    tnum = fraction * tot
+    k = 0
+    thresh = rmin
+
+    for i in range(0, len(hist)):
+        k += hist[i]
+        thresh += dr
+        if (k > tnum): return thresh
+
+    return thresh
+
+def find_threshold_snr(array, pfa=0.01):
+    mean = array.mean()
+    std = array.std()
+    f = 5*scipy.special.erfcinv(2*pfa)
+    return mean + (std * f)
+
+
+def smooth_lfp(signal, width=31, sigma=8.0):
+    ker = ndk.features.gauss_kernel(width, sigma)
+    return convolve(signal, ker)
+
+def score_signal(signal, n, seq, wsize):
+    l_full = np.zeros(n)
+    nwin = int(n / wsize)
+    if (n % wsize) > 0:
+        nwin += 1
+    widx = 0
+    print(' ')
+    for j in range(nwin):
+        print('\rScoring: {}/{} '.format(j,nwin), end="")
+        sys.stdout.flush()
+        i0 = widx
+        i1 = widx + wsize
+        if i1 > n:
+            i1 = n
+        nloc = i1-i0
+        s = signal[i0:i1]
+        k = 1
+        l = np.zeros(nloc)
+        for ker in seq:
+            if use_fft:
+                y = fftconvolve(s, ker, mode='same')
+            else:
+                y = convolve(s, ker, mode='same', method='direct')
+            if ns.positive:
+                l = l + y
+            else:
+                l = l + y*y
+            k += 1
+        widx += wsize
+        l_full[i0:i1] = l[:]
+    print(' ')
+    return l_full
+
+#
+# You MUST filter out low freqs (e.g., using a Butterworth filter)
+# and pass the filtered signal as sig:
+#
+def spike_peaks(sig, threshold):
+    print('Threshold: {}'.format(threshold))
+    upvec = sig > threshold
+    print( 'Peak vector computed.' )
+    sys.stdout.flush()
+
+    print("Length of LFP signal = {}".format(len(sig)))
+    smoothedb = smooth_lfp(sig, 31, 6.0)
+    smoothed = smoothedb[15:-15]
+    print("Length of smoothed signal = {}".format(len(smoothed)))
+    mean = smoothed.mean()
+    print( 'Smoothed signal computed' )
+    sys.stdout.flush()
+    first = ndk.features.deriv(smoothed)
+    print( 'First derivative computed (length={})'.format(len(first)) )
+    sys.stdout.flush()
+    zc = np.zeros(len(sig))
+
+    numzc = 0
+    numpts = len(zc)
+    tick = numpts / 100
+    print(' ')
+    for i in range(1,len(zc)-1):
+        if ( upvec[i] ):
+            if (first[i] == 0 or first[i]*first[i-1] < 0):
+                zc[i] = sig[i]
+                numzc += 1
+        if ( i % tick == 0 ):
+            print( '\rZero crossings: {}% ({})'.format(i/tick, numzc), end="")
+            sys.stdout.flush()
+
+    print( ' ' )
+    print( 'Zero-crossings of first derivative computed.' )
+    sys.stdout.flush()
+    return zc
+
+#
+# Compute the basis:
+#
+seq = dbobj.get_basis(ns.basisid)
+width = len(seq[0])
+
+p = ns.percent / 100.0
+
+print( "Using 5 basis components to score the dataset." )
+
+#
+# Something's different here: for some reason, as of 12/26/2017, I
+# have had to reshape most convolutions to use kernels of shape (n,1).
+# Did neo change?
+#
+
+#signal = lfp_vec[ns.channel]
+if filter:
+    dsobj.filter_data(lo, hi, 6)
+
+signal = dsobj.get_chunk(ns.channel, t0, t1)
+
+#signal = signal.reshape(len(signal))
+#print(signal.shape)
+
+npts = len(signal)
+print('Processing {} samples....'.format(npts))
+margin = width / 2
+# print( margin )
+k = 1
+print( "Convolving...", end="" )
+sys.stdout.flush()
+
+print('signal min={}; max={}'.format(signal.min(), signal.max()))
+
+l = score_signal(signal, npts, seq, ns.window)
+    
+
+print()
+print( "Scoring complete.  Selecting top {} % of peaks.".format(100.0-p*100.0) )
+
+if ns.plot:
+    with open(ns.plot, 'w') as f:
+        i = 0
+        for x in l:
+           f.write('{} {}\n'.format(signal[i], x))
+           i += 1
+
+nbins = 500
+print('score min={}; max={}'.format(l.min(), l.max()))
+thresh = find_threshold(l, nbins, p)
+print('after find_threshold')
+zc = spike_peaks( l, thresh )
+last = len(zc)
+
+# why 16??
+#ts = t0 - 16
+dt = 1
+i = 0
+iprev = 0
+spikeid = -1
+printed = False
+previd = 0
+while (i < last):
+    # spikep = False
+    spikep = (zc[i] != 0)
+
+    if (spikep):
+        # The timestamp is in units of SAMPLES.
+        ts = t0 + i*dt
+        if ( allow_overlap or ( (i-iprev) > width ) ):
+            spikeid += 1
+            dbobj.set_spike_time(spikeid, ts)
+            dbobj.set_spike_basisid(spikeid, ns.basisid)
+            iprev = i
+    i = i + 1
+    if spikeid-previd >= 100:
+        print( '\rSpikes out: {} '.format(spikeid), end="")
+        sys.stdout.flush()
+        previd = spikeid
+
+print( ' ' )
+dbobj.close()

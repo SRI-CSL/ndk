@@ -1,0 +1,37 @@
+#!/usr/bin/env python
+
+import sys
+import argparse
+from ndk.es.db3 import db3
+from ndk.features import isi, histogram
+
+parser = argparse.ArgumentParser(description='Generate ISI data or histogram.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for ISI.')
+parser.add_argument('-hist', default=None, help='Histogram parameters.  If present, a histogram will be generated.')
+parser.add_argument('-clip', dest='clip', action='store_true', help='Whether to clip the data while histogramming.')
+#parser.add_argument('-nbins', type=int, default=50, help='Number of histogram bins.')
+#parser.add_argument('-min', type=float, default=None, help='Minimum value to bin.')
+#parser.add_argument('-max', type=float, default=None, help='Maximum value to bin.')
+ns = parser.parse_args()
+
+if ns.hist != None:
+    spec = ns.hist.split(':')
+    lo = int(spec[0])
+    hi = int(spec[1])
+    nb = int(spec[2])
+    hlen = (hi - lo) / nb
+    hist = N.zeros(hlen)
+
+dbname = ns.files[0]
+db = db3(dbname)
+channel = ns.channel
+
+y = isi(db, channel)
+if ns.hist != None:
+   hist = histogram(y, nb, lo, hi, ns.clip)
+   for val in hist:
+      print( val )
+else:
+   for val in y:
+      print( val )

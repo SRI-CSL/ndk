@@ -1,0 +1,83 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+import numpy as np
+from neo import io
+from scipy.signal import convolve, decimate
+
+# addbasis adds a basis set to the named db.  This is typically useful
+# for adding new representations for different kinds of signals.  The
+# default basis is effective for neuronal spikes, but not for other
+# signals like EKG.  This utility allows you to incrementally specify
+# new basis sets and their component functions.
+
+
+parser = argparse.ArgumentParser(description='Add a basis function to an existing database.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file to be modified.')
+parser.add_argument('-basisid', type=int, default=-1, help='Specify a basis ID to use.  If not supplied, a new basis set will be created.')
+parser.add_argument('-coefs', type=str, default=None, help='Input coefficient file.')
+parser.add_argument('-normalize', dest='normalize', action='store_true', default=True, help='If provided, normalizes each basis function before saving.')
+parser.add_argument('-zero_mean', dest='zero_mean', action='store_true', default=True, help='If provided, force each basis function to be zero-mean before saving.')
+ns = parser.parse_args()
+
+if ns.coefs is None:
+    print('You must supply the -coefs arg.')
+    exit()
+
+dbname = ns.files[0]
+coefname = ns.coefs
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    exit()
+
+if ns.basisid > 0:
+    basis = ns.basisid
+else:
+    dbobj.cur.execute('select max(basisID) from basis;')
+    result = dbobj.cur.fetchone()
+    basis = result[0]
+    basis = basis + 1
+
+
+
+seq = []
+with open(coefname) as f:
+    for line in f:
+        nums = line.split(',')
+        vec = np.zeros(len(nums))
+        mag = 0.0
+        for i in range(len(vec)):
+            vec[i] = float(nums[i])
+            mag += vec[i]*vec[i]
+        if ns.normalize:
+            print('Normalizing.')
+            if mag > 0.0:
+                vec /= math.sqrt(mag)
+        if ns.zero_mean:
+            print('Subtracting mean.')
+            vec[:] -= vec.mean()
+        seq.append(vec)
+# "Natural" width is in milliseconds:
+w = 1000 * len(seq[0]) / dbobj.sample_rate
+# We should make this easier to do:
+
+print('Creating basis {}...'.format(basis))
+dbobj.add_basis(basis, 0.0, w, len(seq), name="") # null name means resort to the functions table
+dbobj.set_functions(basis, seq)
+
+dbobj.close()

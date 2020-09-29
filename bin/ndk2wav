@@ -1,0 +1,287 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import wave
+import numpy
+import ndk.ds
+import os.path
+import quantities as q
+import ndk.es.db3 as db
+import argparse
+from scipy.signal import convolve, decimate, fftconvolve, butter, lfilter
+from math import sin, pi
+from ndk.ui import iprint,wprint,eprint
+
+parser = argparse.ArgumentParser(description='Generate audio from a neuronal data source.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An NDK event store (.db file)')
+parser.add_argument('-channel', type=int, default=2, help='The channel to use for spike extraction (-1 = all).')
+parser.add_argument('-start', type=int, default=-1, help='Starting timestamp (sample number).')
+parser.add_argument('-end', type=int, default=-1, help='Ending timestamp (sample number).')
+parser.add_argument('-split', dest='split', action='store_true', help='If provided, split the outputs along event intervals.')
+parser.add_argument('-full', dest='full', action='store_true', default=True, help='If provided, emit the full wav file.')
+parser.add_argument('-square', dest='square', action='store_true', default=False, help='If provided, square the result before emitting.')
+parser.add_argument('-nofull', dest='full', action='store_false', help='If provided, do NOT emit the full wav file.')
+parser.add_argument('-outfile', default=None, help='Name of a .wav output file.')
+parser.add_argument('-bufsize', type=int, default=357680, help='Output buffer size')
+parser.add_argument('-gain', type=float, default=0.05, help="Gain on the input (in case -normalize isn't enough).")
+parser.add_argument('-filter',  default="300:2000")
+parser.add_argument('-carrier', type=float, default=0, help='Carrier frequency in Hz, if desired.')
+parser.add_argument('-normalize', dest='normalize', action='store_true', default=True, help='If provided, normalize the output to [-1.0,1.0].')
+ns = parser.parse_args()
+
+
+#if len(sys.argv) < 3:
+#    print( "Usage: {} <ds> <wav_file> [channel=all]".format( sys.argv[0] ) )
+#    print( "       Converts the selected channel on a data store into a WAV file.")
+
+#dsname = sys.argv[1]
+#wav = sys.argv[2]
+#chan = None
+
+dbname = ns.files[0]
+wav = ns.outfile
+if ns.channel == -1:
+    chan = None
+else:
+    chan = ns.channel
+
+
+def dc_carrier(sampnum):
+    return 1.0
+
+
+if chan is None:
+    print('Converting all channels to wav.')
+else:
+    print('Converting channel {} to wav.'.format(chan))
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+try:
+	samprate, nchannels, uristring = dbobj.get_metadata()
+except e:
+	print("Couldn't retrieve metadata.  Exiting.")
+	quit()
+	
+dsobj = ndk.ds.open(uristring, dbname)
+t0 = dsobj.t0
+t1 = dsobj.t1
+    
+start = t0
+end = t1
+nsamples = t1-t0
+
+events = dbobj.get_events()
+
+if chan >= nchannels:
+    chan = nchannels - 1
+
+# ssize = 4096
+# ssize=35768
+ssize = ns.bufsize
+#ssize = 65536
+sbuf = numpy.zeros(ssize, dtype='int16')
+#bbuf = numpy.getbuffer(sbuf)
+bbuf = numpy.frombuffer(sbuf)
+sj = 0
+sbuf_count = 0
+
+
+if ns.carrier == 0:
+    carrier_fn = dc_carrier
+else:
+    carrier_fn = lambda x: sin(2.0 * pi * (ns.carrier * x / dbobj.sample_rate))
+    
+
+def put_sample(x, f, finish=False):
+    global ssize, sj, sbuf, bbuf, sbuf_count
+    # 'x' is assumed to be a float.  We convert it to an int16.
+    if finish == True:
+        sbuf[sj:] = 0
+        sj = ssize
+    else:
+        sbuf[sj] = int(x)
+        sj += 1
+
+    if sj >= ssize:
+        f.writeframes(bbuf)
+        sj = 0
+
+
+
+
+        
+def write_wav_file(filename, data, interval=None):
+    scale = 65535.0 
+    offset = 32767.0
+    print('[I] Writing {}'.format(filename))
+    outf = wave.open(filename, 'w') 
+    sj = 0
+    sbuf_count = 0
+    s1 = numpy.std(data)
+    f = s1
+    print("s1 = {}".format(s1))
+    print ("gain = {}".format(ns.gain))
+    sigma = f / ns.gain
+    print("multiplier = {}".format(sigma))
+    outvec = data # / q.V
+    omin = -sigma
+    omax = sigma
+    outvec = (outvec - omin) / (omax - omin)
+    outvec = scale * outvec - offset
+    print( "ssize={} r={}".format(ssize, omax) )
+
+    outf.setnchannels(1)
+    outf.setsampwidth(2)
+    outf.setframerate(samprate)
+    tot = len(outvec)
+    old_pct = 0
+    if interval is None:
+        interval = (0,len(outvec))
+    for k in range(interval[0],interval[1]):
+        x = int(outvec[k] * carrier_fn(k))
+        put_sample(x, outf)
+        pct = int( (100*k) / tot )
+        if (pct > old_pct):
+            print( format('{}%\r').format(pct), end="" )
+            sys.stdout.flush()
+            old_pct = pct
+
+    put_sample(0, outf, True)
+
+
+def write_wav_file_all(filename, data):
+    print('[I] Writing {}'.format(filename))
+    outf = wave.open(filename, 'w') 
+    sj = 0
+    sbuf_count = 0
+
+    outvecs = []
+    
+    for vec in data:
+        next = vec / q.V
+        outvecs.append(next)
+
+        nmin = next.min()
+        nmax = next.max()
+        r = max(abs(nmin), abs(nmax))
+        nmin = -r
+        nmax = r
+        next = (next - nmin) / (nmax - nmin)
+        next = 65535.0 * next - 32767.0
+        outvecs.append(next)
+        
+    print( "[I] buffer size={} r={} nchannels={}".format(ssize, r, len(outvecs)) )
+
+    nchannels = len(outvecs)
+    outf.setnchannels(nchannels)
+    outf.setsampwidth(2)
+    outf.setframerate(samprate)
+    tot = len(outvecs[0])
+    old_pct = 0
+    for k in range(len(outvecs[0])):
+
+        # Convert each channel's sample:
+        for j in range(nchannels):
+            a = outvecs[j]
+            put_sample(a[k], outf)
+
+        # Show Progress:
+        pct = (100*k) / tot
+        if (pct > old_pct):
+            print( format('{}%\r').format(pct), end="" )
+            sys.stdout.flush()
+            old_pct = pct
+
+    put_sample(0, outf, True)
+    put_sample(0, outf, True)
+    put_sample(0, outf, True)
+    put_sample(0, outf, True)
+
+    
+def parse_filter_args(arg):
+    [lowstr, highstr] = arg.split(':')
+    if len(lowstr) == 0:
+        lo = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+
+    return lo,hi
+
+if ns.filter.find(':') == -1:
+    filter = False
+    iprint( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filter = True
+    lo,hi = parse_filter_args(ns.filter)
+    iprint( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+if ns.start < 0:
+    start = 0
+else:
+    start = ns.start
+    
+if ns.end >= t1 or ns.end < 0:
+    end = t1
+else:
+    end = ns.end
+
+
+def smooth_lfp(signal, width=31, sigma=8.0):
+    ker = ndk.features.gauss_kernel(width, sigma)
+    #print(signal.shape)
+    #print(ker.shape)
+    iprint("Kernel: {}".format(ker))
+    if len(signal.shape) == 2:
+        return convolve(signal[:,0], ker, mode='same')
+    else:
+        return convolve(signal[:], ker, mode='same')
+    
+interval = (start, end)
+
+save_diffs = False
+
+if chan is not None:
+    dsobj = ndk.ds.open(uristring, dbname)
+    if (filter):
+        dsobj.filter_data(lo, hi)
+        signal = dsobj.get_chunk( chan, t0, t1)
+    else:
+        # samprate already set
+        signal = dsobj.get_signal(chan)
+
+    if ns.square:
+        signal[:] = signal[:]*signal[:]
+        window_len = 2048
+        #        s=numpy.r_[signal[window_len-1:0:-1],signal,signal[-2:-window_len-1:-1]]
+        #        w=numpy.ones(window_len,'d')
+        #        signal=numpy.convolve(w/w.sum(),s,mode='valid')
+        signal = smooth_lfp(signal, width=2048, sigma=512.0)
+
+    # print('[I] lfp_vec shape: {}'.format(lfp_vec.shape))
+    if ns.full:
+        print('[I] writing full wav file to {}.'.format(wav))
+        write_wav_file(wav, signal, interval)
+    if ns.split:
+        k = 0
+        root = wav.split('.')
+        print('[I] Splitting time series into {} intervals.'.format(len(events)-1))
+        for k in range(len(events)-1):
+            t0 = events[k]
+            t1 = events[k+1]
+            if start <= t0[0] and t1[0] <= end:
+                write_wav_file('{}_interval{}.wav'.format(root[0], k), signal, (t0[0], t1[0]))
+            k += 1
+else:
+    print("You must select a channel.")

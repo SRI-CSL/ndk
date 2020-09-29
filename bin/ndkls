@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import os
+import sys
+import ndk
+
+
+# Display information about a selected directory.  I think we should
+# use os.walk to be on the safe side, looking for data sources and
+# event sources, and listing their metadata.
+def show_nbm(dirname, name, items, verbose=False):
+    path = os.path.join(dirname, name)
+    d = {}
+    print_p = False
+    with open(path) as f:
+        for line in f:
+            text = line.split('\n')[0]
+            pair = text.split('=')
+            d[pair[0]] = pair[1]
+            if found_p(pair[1], items):
+                print_p = True
+    if print_p:
+        if not verbose:
+            print(path)
+        else:
+            print("Data source {} metadata:".format(path))
+            for key in d:
+                print('       {} = {}'.format(key, d[key]))
+            print(' ')
+
+
+def show_db(dirname, name, items):
+    path = os.path.join(dirname, name)
+    # print("Event source {}.".format(path))
+
+
+# ALL items must be found:
+def found_p(s1, items):
+    for s in items:
+        x = s1.find(s)
+        #print('{}.find({}) = {}'.format(s1,s,x))
+        if s1.find(s) < 0:
+            return False
+    return True
+
+
+if len(sys.argv) < 2:
+    print("Usage: ndkls <dir> [search items]")
+else:
+    items = sys.argv[2:]
+#    if len(items) > 0:
+#        print("Looking for items: {}".format(items))
+    for dirname, dirnames, filenames in os.walk(sys.argv[1]):
+        for name in filenames:
+            x = name.split('.')
+            if len(x) > 1:
+                if x[1] == 'nbm':
+                    show_nbm(dirname, name, items)
+                elif x[1] == 'db':
+                    show_db(dirname, name, items)

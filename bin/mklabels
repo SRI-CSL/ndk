@@ -1,0 +1,36 @@
+#!/usr/bin/env python
+
+import sys
+import os.path
+import argparse
+import ndk.es.db3 as db
+
+# mkdb initializes an sqlite3 database file using a recording file.
+# It initializes or checks the file's 'meta' table and verifies or
+# adds to the basis table.  It will refuse to do anything if there are
+# inconsistencies.
+
+parser = argparse.ArgumentParser(description='If necessary, create a spikelabels table in an sqlite3 database file for an LFP recording.')
+parser.add_argument('filename',  metavar='FILE', nargs=1, help='A database file to process')
+ns = parser.parse_args()
+
+dbname = os.path.abspath(ns.filename[0])
+
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+dbobj.make_spikelabels_table()
+dbobj.make_default_labels()
+
+cmd = ' '.join(sys.argv)
+print("[I] logging: {}".format(cmd))
+dbobj.add_history('"{}"'.format(cmd))
+
+dbobj.close()

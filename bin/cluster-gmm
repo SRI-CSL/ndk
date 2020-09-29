@@ -1,0 +1,74 @@
+#!/usr/bin/env python
+
+import sys
+import argparse
+import ndk.features
+import ndk.es.db3 as db
+import numpy
+import sklearn.mixture as skmix
+from sklearn.decomposition import PCA
+
+def pca_reduce(parray, ncomp=3):
+    p = PCA(n_components=ncomp)
+    pf = p.fit(parray)
+    return pf.transform(parray)
+
+#
+# Gaussian mixture model:
+#
+def gmm_cluster(x, n_comp=3):
+    g = skmix.GaussianMixture(n_components=n_comp)
+    gf = g.fit(x)
+    print ("GMM convergence: {}".format(g.converged_))
+    return gf.predict(x)
+
+
+
+# Each basis has an INDEPENDENT set of labels, so that a full
+# qualification of spike cluster is derived from basis and label.
+# Clusters are NOT allowed to span bases, since each basis is strongly
+# assumed to correspond to a different phenomenon (e.g., A vs. B fiber
+# spiking).  Hence, all clustering is done
+
+def gmm_relabel(ds, coefs, ncomp=2, nclust=4, basis=0):
+    ds.execute('select spikeID from spikebasis where basisID={} order by spikeID;'.format(basis))
+    spike_ids = ds.fetchall()
+    vals = ds.get_coef_array(coefs, basis)
+    print( vals.shape )
+    pwr = vals.T
+
+    if (ncomp > 0):
+        x = pca_reduce(pwr, ncomp)
+    else:
+        x = pwr
+
+    l = gmm_cluster(x, nclust)
+    for i in range(0,len(l)):
+        ds.set_spike_label(spike_ids[i][0], l[i])
+
+
+parser = argparse.ArgumentParser(description='Uses a Gaussian Mixture Model for clustering the dataset.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-coefs', default='0:0,1:0,2:0', help='Coefficients to use for clustering.')
+parser.add_argument('-ncomp', type=int, default=3, help='Number of PCA components to use for dimensionality reduction.')
+parser.add_argument('-nclusters', type=int, default=5, help='Number of clusters to try.')
+parser.add_argument('-basis', type=int, default=0, help='Only cluster within the same basis set.')
+ns = parser.parse_args()
+
+filename = ns.files[0]
+coefs = ndk.features.parse_coef_spec(ns.coefs)
+ncomp = ns.ncomp
+nclusters = ns.nclusters
+basis = ns.basis
+
+print( "Operating on basis {}.".format(basis) )
+
+dbobj = db.open_event_store(filename)
+
+if dbobj != None:
+    gmm_relabel(dbobj, coefs, ncomp, nclusters, basis)
+    h = dbobj.label_histogram()
+    print( 'Label counts:' )
+    for i in range(len(h)):
+        print( 'label {}: {}'.format(i, h[i]) )
+    dbobj.close()

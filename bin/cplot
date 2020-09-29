@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+
+# Probably doesn't work on Windows:
+# matplotlib.use('GTKAgg')
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+
+global spike, nspikes, sl
+
+parser = argparse.ArgumentParser(description='Plot all waveforms for a given cluster and channel.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-cluster', type=int, default=0, help='Use the given cluster number (label).  Default is 0.')
+parser.add_argument('-channel', type=int, default=0, help='Use the given channel.  Default is 0 (first channel).')
+parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, attempts to overlay raw data.')
+ns = parser.parse_args()
+
+# vcoefs plots waveforms and reconstructed waveforms, to visualize the
+# accuracy of spike representation.
+
+dbname = ns.files[0]
+
+f = plt.gcf()
+dpi = f.get_dpi()
+print( "dpi = ", dpi )
+default = f.get_size_inches()
+print( "default size = ", default )
+#f.set_size_inches(default[0]*2, default[1]*2)
+#size = f.get_size_inches()
+#print( "new size = ", size )
+#f=plt.subplots(figsize=size)
+#f=plt.subplots()
+
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, recfile = dbobj.get_metadata()
+nspikes = dbobj.get_spike_count()
+
+if ns.raw:
+    lfp_vec, samprate, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+
+
+def plot_spikes(es, cluster, channel, subplot=111):
+    global nspikes
+    es.execute('select spikeID from spikelabels where label = {}'.format(cluster))
+    result = es.fetchall()
+
+    d = 0.0
+    tot = 0.0
+    npts = len(result)
+    print(npts)
+    inc = int(npts / 100.0)
+    if inc == 0:
+        inc = 1
+    plt.subplot(subplot)  #, xmargin=0.5)
+    ax = plt.gca()
+    ax.clear()
+
+    # Per-channel plots:
+    percent = 0
+    for i in range(0, len(result)):
+        if (i % inc == 0):
+            print( '{}% \r'.format(int (100.0*i / npts) ), end='')
+            sys.stdout.flush()
+        spike_id = result[i][0]
+        ts = es.get_spike_time(spike_id)
+        y = es.get_spike_waveform(spike_id, channel)
+        winsize = len(y)
+        if ns.raw:
+            x = ndk.features.get_window(lfp_vec[channel], ts, winsize)
+            plt.plot(x, color='red', alpha=0.5)
+
+        plt.plot(y, color='blue', alpha=0.5)
+
+    ax.set_xlabel("Sample")
+    ax.set_ylabel("Spike magnitude")
+    ax.grid(True)
+    ax.set_xticks(ax.get_xticks()[::2])
+    ax.set_yticks(ax.get_yticks()[::2])
+    plt.draw()
+
+    return d
+
+def press(event):
+    global dbobj
+    if event.key == 'q':
+        quit()
+
+
+plt.connect('key_press_event', press)
+plot_spikes(dbobj, ns.cluster, ns.channel)
+plt.show()
+
+dbobj.close()

@@ -1,0 +1,250 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+#
+# Theano version of the event (spike) sorter - runs much faster than
+# the original scipy convolution routine.
+import sys
+import ndk.ds
+import ndk.features
+from ndk.features import find_threshold_hist, find_threshold_snr, smooth_lfp, spike_peaks
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+from uritools import urisplit
+import numpy as np
+from scipy.signal import convolve, decimate
+import theano
+import theano.tensor as tensor
+#from theano.tensor.signal.conv import conv2d
+from theano.tensor.nnet import conv2d
+
+# mkspikes populates a database file with spike times and spike basis
+# numbers.  These correspond to the 'spiketimes' and 'spikebasis'
+# tables.  Uses the basis scoring function to localize peaks in the
+# score and mark spikes.
+
+
+# Code below wraps up the basis convolution into Theano.  We should
+# also fold in the peak detection code, which is currently pure numpy.
+
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-basisid', type=int, default=0, help='Basis ID.')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for spike extraction.')
+parser.add_argument('-percent', type=float, default=99, help='Rejection percentage.  Th bottom p% of spikes are rejected.  p=99% by default.')
+parser.add_argument('-overlap', default="off", help='If "on", allow overlap in spike windows.')
+parser.add_argument('-decimate', type=int, default=0, help="Decimation factor, if desired")
+parser.add_argument('-rebuild', dest='rebuild', action='store_true', help='If provided, rebuild the db file by resetting all tables.')
+ns = parser.parse_args()
+
+allow_overlap = (ns.overlap == "on")
+
+dbname = ns.files[0]
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, uristring = dbobj.get_metadata()
+print( samprate, nchannels, uristring )
+
+if ns.rebuild:
+    # Drop these tables so that they are completely rebuilt:
+    dbobj.drop('spiketimes')
+    dbobj.drop('spikebasis')
+    dbobj.drop('spikecoefs')
+    dbobj.drop('spikelabels')
+
+dbobj.make_spiketimes_table()
+dbobj.make_spikebasis_table()
+
+smr = urisplit(uristring)
+recfile = smr.path
+print(recfile)
+lfp_vec, samprate, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+nchannels = len(lfp_vec)
+
+
+# Histogram-based threshold selection: Assumes that "useful" spikes
+# appear only in the top x% of signal values.  This needs to be
+# validated and compared to RMS-error-based threshold selection.
+#
+# 1) Find the min and max values in array
+# 2) Histogram the array
+# 3) Find the threshold that eliminates the given fraction of histogram mass
+#
+def find_threshold_0(array, nbins, fraction):
+    rmin = array.min()
+    rmax = array.max()
+    hist, edges = np.histogram(array, nbins)
+
+    tot = np.sum(hist)
+    dr = (rmax-rmin) / len(hist)
+
+    tnum = fraction * tot
+    k = 0
+    thresh = rmin
+
+    for i in range(0, len(hist)):
+        k += hist[i]
+        thresh += dr
+        if (k > tnum): return thresh
+
+    return thresh
+
+def find_threshold_snr_0(array, pfa=0.01):
+    mean = array.mean()
+    std = array.std()
+    f = 5*scipy.special.erfcinv(2*pfa)
+    return mean + (std * f)
+
+
+# Should this be expressed in terms of samples (as it is here), or in
+# milliseconds?
+def smooth_lfp_0(sig, width=31, sigma=8.0):
+    ker = ndk.features.gauss_kernel(width, sigma)
+    return convolve(sig, ker)
+
+
+#
+# You MUST filter out low freqs (e.g., using a Butterworth filter)
+# and pass the filtered signal as sig:
+#
+def spike_peaks_0(sig, threshold):
+    upvec = sig > threshold
+    print( 'Peak vector computed.' )
+    sys.stdout.flush()
+
+    smoothed = smooth_lfp(sig, 31, 6.0)
+    mean = smoothed.mean()
+    print( 'Smoothed signal computed' )
+    sys.stdout.flush()
+    first = ndk.features.deriv(smoothed)
+    print( 'First derivative computed' )
+    sys.stdout.flush()
+    zc = np.zeros(len(sig))
+
+    numzc = 0
+    numpts = len(zc)
+    tick = numpts / 100
+    for i in range(1,len(zc)-1):
+        if ( upvec[i] ):
+            if (first[i] == 0 or first[i]*first[i-1] < 0):
+                zc[i] = sig[i]
+                numzc += 1
+        if ( i % tick == 0 ):
+            print( '{}% ({})'.format(i/tick, numzc), end='')
+            sys.stdout.flush()
+
+    print( ' ' )
+    print( 'Zero-crossings of first derivative computed.' )
+    sys.stdout.flush()
+    return zc
+
+#
+# Compute the basis:
+#
+seq = dbobj.get_basis(ns.basisid)
+width = len(seq[0])
+
+p = ns.percent / 100.0
+
+print( "Using 5 basis components to score the dataset." )
+
+sig = lfp_vec[ns.channel]
+if ns.decimate > 0:
+    while ns.decimate > 1:
+        sig = decimate(sig, 10)
+        ns.decimate = ns.decimate / 10
+npts = len(sig)
+l = np.zeros(npts)
+margin = width / 2
+
+if len(l) % 2 == 0:
+    left = margin-1
+    right = -(margin+1)
+else:
+    left = margin-1
+    right = -margin
+
+print( "left = {}; right = {}".format(left, right) )
+# print( margin )
+k = 1
+print( "Convolving...", end="")
+sys.stdout.flush()
+nfilt = len(seq[0])
+
+print( "Theano setup...", end="")
+st = theano.shared(np.asarray(sig.reshape(1,npts,1,1)), 'sig')
+kt = tensor.tensor4('kt', dtype='float32')
+yt = conv2d(st, kt, border_mode='full')
+y = yt * yt
+f = theano.function([kt], y)
+print( "done...", end="")
+
+print( l.shape )
+for ker in seq:
+    ker2 = np.asarray(ker.reshape(1,nfilt,1,1),dtype=np.float32)
+    y = f(ker2)
+    print( "Basis {}...".format(k), end="")
+    sys.stdout.flush()
+    v = y[0][left:right]
+    vlen = len(v)
+    llen = len(l)
+    diff = (vlen - llen)
+    if diff == 0:
+        l = l + v
+    elif diff > 0:
+        m = diff / 2
+        left = m
+        right = -m
+        print( "left = {}; right = {}".format(left, right) )
+        l = l + v[left:right]
+    k += 1
+print
+print( "Scoring complete.  Selecting top {} % of peaks.".format(100.0-p*100.0) )
+# This is not in Theano - would it help?
+nbins = 500
+thresh = find_threshold_hist(l, nbins, p)
+zc = spike_peaks( l, thresh )
+last = len(zc)
+
+
+# why 16??
+ts = t0 - 16
+dt = ns.decimate
+if dt == 0:
+    dt = 1
+i = 0
+iprev = 0
+spikeid = -1
+printed = False
+previd = 0
+while (i < last):
+    # spikep = False
+    spikep = (zc[i] != 0)
+
+    if (spikep):
+        # The timestamp is in units of SAMPLES.
+        ts = t0 + i*dt
+        if ( allow_overlap or ( (i-iprev) > width ) ):
+            spikeid += 1
+            dbobj.set_spike_time(spikeid, ts)
+            dbobj.set_spike_basisid(spikeid, ns.basisid)
+            iprev = i
+    i = i + 1
+    if spikeid-previd >= 100:
+        print( '{} '.format(spikeid), end='')
+        previd = spikeid
+
+print( ' ' )
+
+dbobj.close()

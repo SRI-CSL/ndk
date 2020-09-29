@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import os
+import sys
+import ndk
+import time
+import numpy
+from ndk.ds.nbf import floats_to_nbf
+
+# Bulk conversion of a recording directory into nbf form.  Assumes
+# that the 1st arg is a directory that points to a set of
+# subdirectories containing neo-compatible recordings, each of which
+# is named according to the convention:
+
+#   yyyy-mm-dd_hh-mm-ss_<info>
+
+# where <info> is an arbitrary string that could include spaces and
+# other special characters that make things difficult for Linux shell
+# parsing.  The second arg is a target directory that will contain all
+# the nbf representations of the recordings.
+
+# This script takes a directory <from_dir> as its first argument and
+# uses os.walk to traverse the filesystem beneath that directory and
+# generate nbf representations.  The nbf representations are stored in
+# a subdirectory of <dir> called 'nbf'. For each recording directory
+# (i.e., a directory that contains a CSC1.ncs file), create a
+# corresponding directory under <dir>/nbf with the datestamp and a
+# sequence number, like this:
+
+#    yyyy-mm-dd_hh-mm-ss_001
+
+# Information that is encoded in the directory name will be saved in
+# the nbf.nbm file using the source= parameter, and we should be able
+# to (later) parse that source string into component metadata.
+
+def isint(str):
+   try:
+      x = int(str)
+   except:
+      return False
+   return True
+
+def transcode(src, dst):
+   tuple = ndk.ds.read_raw_data(src)
+   lfp_vec = tuple[0]
+   samprate = tuple[1]
+   t0 = tuple[2]
+   t1 = tuple[3]
+   seg = tuple[4]
+   events = None
+   if len(tuple) > 5:
+      events = tuple[5]
+   floats_to_nbf(dst, numpy.asarray(lfp_vec), samprate, t0, t1, events, source=src)
+   
+
+if len(sys.argv) != 3:
+   print("Usage: {} <from_dir> <to_dir> [-force]".format(sys.argv[0]))
+else:
+   from_dir = sys.argv[1]
+   to_dir = sys.argv[2]
+
+   force = False
+   fakesec = 23456
+   nbfdir = os.path.join(to_dir, 'nbf')
+   if not os.path.isdir(nbfdir):
+      os.mkdir(nbfdir)
+      
+   for dirname, dirnames, filenames in os.walk(from_dir):
+      last = os.path.basename(os.path.normpath(dirname))
+      parts = last.split('_')
+      recfile = None
+      date = parts[0].split('-')
+      proceed = (len(date) == 3 and isint(date[0]) and isint(date[1]) and isint(date[2]))
+      if proceed:
+         tstamp = parts[1].split('-')
+         if not ( len(tstamp) == 3 and isint(tstamp[0]) and isint(tstamp[1]) and isint(tstamp[2]) ):
+            info = parts[1:]
+            faketime = time.gmtime(fakesec)
+            fakesec += 60
+            parts[1] = '{:>02}-{:>02}-{:>02}'.format(faketime.tm_hour, faketime.tm_min, faketime.tm_sec)
+         else:
+            info = parts[2:]
+         key = '_'.join((parts[0], parts[1]))
+         l = []
+         if 'CSC1.ncs' in filenames:
+            l.append('CSC1.ncs')
+         else:
+            for name in filenames:
+               x = name.split('.')
+               if len(x) > 1 and x[1] == 'smr':
+                  if len(l) > 0:
+                     print('Extra target found: {}'.format(os.path.join(dirname, name)))
+                  l.append(name)
+         if len(l) > 0:
+            seq = 1
+            for recfile in l:
+               name = "{}-{:>03}".format(key, seq)
+               seq += 1
+               source = os.path.join(dirname, recfile)
+               dest = os.path.join(nbfdir, name)
+               nbmfile = os.path.join(dest, '{}.nbm'.format(name))
+               try:
+                  if os.path.exists(nbmfile) and not force:
+                     print("{} already exists. Skipping...".format(nbmfile))
+                  else:
+                     print('Transcoding {} to {}'.format(source, dest))
+                     transcode(source, dest)
+               except:
+                  print('Transcoding failed.   Moving on.')

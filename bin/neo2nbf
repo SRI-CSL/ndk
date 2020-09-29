@@ -1,0 +1,47 @@
+#!/usr/bin/env PYTHONOPTIMIZE=1 python
+
+# By adding PYTHONOPTIMIZE=1, we suppress assert statements and get
+# around neo.io.PlexonIO's confusion about sampling rates.
+
+from __future__ import print_function
+
+import ndk.ds
+from ndk.ds.nbf import floats_to_nbf
+import os
+import os.path
+import sys
+import numpy
+
+
+# Now identical to smr2nbf...
+
+if len(sys.argv) != 3:
+   print('Usage: neo2nbf <from_file> <to_dir>')
+   print('       Converts neo-readable spike2 and Neuralynx field potential data into memory-mappable nbf form.')
+else:
+   # print('WARNING:  This will generate absolute pathnames that will BREAK some ndk utilities.  FIX ME')
+   src = os.path.abspath(sys.argv[1])
+   dst = os.path.abspath(sys.argv[2])
+   print('Converting {} to nbf directory {}'.format(src, dst))
+   tuple = ndk.ds.read_raw_data(src)
+   print(tuple)
+   lfp_vec = tuple[0]
+   if type(lfp_vec) is list:
+       if len(lfp_vec) > 1:
+           print("Don't know how to handle an lfp_vec list with multiple elements.")
+       else:
+           lfp_vec = numpy.transpose(lfp_vec)
+   samprate = tuple[1]
+   t0 = tuple[2]
+   t1 = tuple[3]
+   seg = tuple[4]
+   print(tuple)
+   events = None
+   if len(tuple) > 5:
+      events = tuple[5]
+   try:
+      print('lfp_vec shape: {}'.format(lfp_vec.shape))
+   except:
+      print('lfp_vec: {}', lfp_vec)
+   floats_to_nbf(dst, numpy.asarray(lfp_vec), samprate, t0, t1, events)
+   

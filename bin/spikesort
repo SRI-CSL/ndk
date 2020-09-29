@@ -1,0 +1,365 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+import numpy as np
+from scipy.signal import convolve, decimate, fftconvolve, butter, lfilter
+from uritools import urisplit
+from ndk.ui import iprint,wprint,eprint
+import ndk.ui as ui
+
+# Really stripped down: ONLY considers peaks and their zero-crossings.
+# Relies on the butterworth filter to smooth the signal.
+
+
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.') 
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for spike extraction.')
+parser.add_argument('-percent', type=float, default=98, help='Rejection percentage.  Th bottom p percent of spikes are rejected.  p=99.5 by default.')
+parser.add_argument('-threshold', type=float, default=None, help='Threshold to use (instead of percent).')
+parser.add_argument('-filter',  default="160:2000")
+parser.add_argument('-resp', dest='resp', action='store_true', default=True, help='If provided, use low-pass filtering to detect respiration events.')
+parser.add_argument('-positive', dest='positive', action='store_true', default=True, help='If provided, use positive scores for marking events (default action).')
+parser.add_argument('-negative', dest='negative', action='store_true', default=False, help='If provided, use negative scores for marking events.')
+parser.add_argument('-shift',  type=int, default=1, help='If provided, shift the actual timestamp by the specified number of samples.')
+parser.add_argument('-window', type=int, default=1048576, help='Window size in samples for piecewise processing.')
+ns = parser.parse_args()
+
+def parse_filter_args(arg):
+    [lowstr, highstr] = arg.split(':')
+    if len(lowstr) == 0:
+        lo = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+
+    return lo,hi
+
+if ns.filter.find(':') == -1:
+    filter = False
+    iprint( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filter = True
+    lo,hi = parse_filter_args(ns.filter)
+    iprint( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+do_smoothing = False
+score_w = None
+score_s  = None
+dbname = ns.files[0]
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+
+samprate, nchannels, uristring = dbobj.get_metadata()
+iprint( "sample rate = {}; nchannels = {}; URI = {}".format( samprate, nchannels, uristring ))
+
+dbobj.make_spiketimes_table(dbobj)
+dbobj.make_spikebasis_table(dbobj)
+
+dsobj = ndk.ds.open(uristring, dbname)
+t0 = dsobj.t0
+t1 = dsobj.t1
+
+if (filter):
+    dsobj.filter_data(lo, hi)
+    signal = dsobj.get_chunk(ns.channel, t0, t1)
+else:
+    # samprate already set
+    signal = dsobj.get_signal(ns.channel)
+
+    
+# Histogram-based threshold selection: Assumes that "useful" spikes
+# appear only in the top x% of signal values.  This needs to be
+# validated and compared to RMS-error-based threshold selection.
+#
+# 1) Find the min and max values in array
+# 2) Histogram the array
+# 3) Find the threshold that eliminates the given fraction of histogram mass
+#
+def find_threshold(array, nbins, fraction):
+    rmin = array.min()
+    rmax = array.max()
+    hist, edges = np.histogram(array, nbins)
+    #print(hist)
+
+    with open('/tmp/mkspikes-hist.dat', 'w') as f:
+        for x in hist:
+            f.write('{}\n'.format(x))
+            
+
+    tot = np.sum(hist)
+    dr = (rmax-rmin) / len(hist)
+
+    tnum = fraction * tot
+    k = 0
+    thresh = rmin
+
+    for i in range(0, len(hist)):
+        k += hist[i]
+        thresh += dr
+        if (k > tnum): return thresh
+
+    return thresh
+
+def find_threshold_snr(array, pfa=0.01):
+    mean = array.mean()
+    std = array.std()
+    f = 5*scipy.special.erfcinv(2*pfa)
+    return mean + (std * f)
+
+
+def smooth_lfp(signal, width=31, sigma=8.0):
+    ker = ndk.features.gauss_kernel(width, sigma)
+    #print(signal.shape)
+    #print(ker.shape)
+    iprint("Kernel: {}".format(ker))
+    if len(signal.shape) == 2:
+        return convolve(signal[:,0], ker, mode='same')
+    else:
+        return convolve(signal[:], ker, mode='same')
+
+
+
+def score_signal_peak(signal, n, wsize):
+    # Use ONLY the first basis function to score the dataset:
+    l_full = np.zeros((n))
+    nwin = int(n / wsize)
+    if n % wsize > 0:
+        nwin += 1
+    widx = 0
+    old_percent = 0
+    #
+    # You can pass in None for seq and a 3-point smoothing kernel will
+    # be used.  Do this if you are pre-filtering the data.  If you are
+    # not filtering, you can use first kernel function which should
+    # behave like a low-pass filter (the else clause):
+    if seq is None:
+        ker = np.zeros(3)
+        ker[0] = 0.25
+        ker[1] = 0.5
+        ker[2] = 0.25
+    else:
+        # This is a more "traditional" peak-finding algorithm, on the
+        # assumption that the first element of the basis set is a
+        # gaussian:
+        ker = seq[0]
+    hw = len(ker)
+    if len(signal.shape) == 2:
+        ker2 = ker.reshape((len(ker),1))
+    else:
+        ker2 = ker
+
+    # For each window in signal:
+    for j in range(nwin):
+        percent = (100 * j) / nwin
+        if percent > old_percent:
+            old_percent = percent
+            print('Convolving...{:>3}%\r'.format(int(percent)), end="")
+        i0 = widx
+        i1 = widx + wsize
+        widx = i1 + 1
+        if i1 > n:
+            i1 = n
+            wsize = i1-i0
+        if ns.negative:
+            s = -signal[i0:i1]
+        else:
+            s = signal[i0:i1]
+
+        l = np.zeros((wsize))
+
+        if use_fft:
+            yr = fftconvolve(s, ker2)
+        else:
+            # Can't simply window here.  We have to window outside the kernel loop.
+            yr = convolve(s, ker2, method='direct')
+
+        sys.stdout.flush()
+        # Force y to fit in l:
+        y = yr[hw-1:]
+        if len(y) > len(l):
+            y = y[1:]
+
+        if ns.positive or ns.negative:
+            l = l + y
+        else:
+            l = l + y*y
+
+        l_full[i0:i1] = l[:]
+    sys.stdout.write('\n')
+    return l_full
+
+
+#
+# Best used with score smoothing
+def score_raw_thresholds(signal, n, wsize, thresh):
+    l_full = np.zeros((n))
+    nwin = int(n / wsize)
+    if n % wsize > 0:
+        nwin += 1
+    widx = 0
+    old_percent = 0
+    # For each window in signal:
+    for j in range(nwin):
+        percent = (100 * j) / nwin
+        if percent > old_percent:
+            old_percent = percent
+            print('Convolving...{:>3}%\r'.format(int(percent)), end="")
+        i0 = widx
+        i1 = widx + wsize
+        widx = i1 + 1
+        if i1 > n:
+            i1 = n
+            wsize = i1-i0
+        if ns.negative:
+            s = -signal[i0:i1]
+        else:
+            s = signal[i0:i1]
+
+        # l = np.zeros((wsize,1))
+        l = np.zeros((wsize))
+
+        l = np.where(s>thresh, s, 0.0)
+            
+        sys.stdout.flush()
+
+        l_full[i0:i1] = l[:]
+    sys.stdout.write('\n')
+    return l_full
+
+
+#
+# You MUST filter out low freqs (e.g., using a Butterworth filter)
+# and pass the filtered signal as sig:
+#
+def spike_peaks(sig, threshold, smoothing_width=31, sigma=6.0):
+
+    # This version is minimal - just find peaks, 1st derivatives, and
+    # zero crossings:
+    
+    iprint('Threshold: {}'.format(threshold))
+    upvec = sig > threshold
+    iprint( 'Peak vector computed.' )
+    sys.stdout.flush()
+
+    iprint("Length of LFP signal = {}".format(len(sig)))
+
+    first = ndk.features.deriv(sig)
+    iprint( 'First derivative computed (length={})'.format(len(first)) )
+    sys.stdout.flush()
+    zc = np.zeros(len(sig))
+
+    numzc = 0
+    numpts = len(zc)
+    tick = numpts / 100
+    for i in range(1,len(first)-2):
+        if ( upvec[i] ):
+            # A bug (or quirk) of the derivative computation results
+            # in a shift of 1 sample:
+            j = i+2
+            # If the first derivative is exactly 0 here, then mark it:
+            if (first[j] == 0):
+                zc[i] = sig[i]
+                numzc += 1
+            # Else if there is a sign change, choose which side to mark, then mark it:
+            elif first[j]*first[j-1] < 0:
+                if abs(first[j-1]) < abs(first[j]):
+                    zc[i-1] = sig[i-1]
+                    numzc += 1
+                else:
+                    zc[i] = sig[i]
+                    numzc += 1
+                        
+        if ( i % tick == 0 ):
+            print( 'Zero crossings: {:>3}% ({:>6})\r'.format(i/tick, numzc), end="")
+            sys.stdout.flush()
+
+    sys.stdout.write('\n')
+    iprint( 'Zero-crossings of first derivative computed.' )
+    sys.stdout.flush()
+    return zc
+
+
+if ns.resp:
+    iprint("Processing respiratory events...")
+    signal[:] = signal[:] * signal[:]
+    #signal = smooth_lfp(signal, width=8192, sigma=2048.0)
+    signal = smooth_lfp(signal, width=2048, sigma=512.0)
+    with open('/tmp/respdata.dat', 'w') as f:
+        for x in signal:
+            f.write( "{}\n".format(x) )
+
+threshp = ns.percent / 100.0
+npts = len(signal)
+l = np.zeros(npts)
+k = 1
+print( "Convolving...\r", end="" )
+sys.stdout.flush()
+shift = ns.shift
+iprint('Using a shift of {} samples.'.format(shift))
+
+nbins = 500
+if ns.threshold is None:
+    thresh = find_threshold(signal, nbins, threshp)
+else:
+    thresh = ns.threshold
+zc = spike_peaks( signal, thresh, score_w, score_s )
+last = len(zc)
+
+i = 0
+iprev = 0
+spikeid = dbobj.max_spike_id()
+printed = False
+previd = 0
+with ui.context(ui.colors.OKGREEN) as c:
+    print("[I] Spike events: ", end="")
+    while (i < last):
+        # spikep = False
+        spikep = (zc[i] != 0)
+
+        if (spikep):
+            # The timestamp is in units of SAMPLES.
+            ts = t0 + i + shift
+
+            spikeid += 1
+            dbobj.set_spike_time(spikeid, ts)
+            dbobj.set_spike_basisid(spikeid, 0)
+            # Also save the spike channel.  We can display or
+            # analyze selectively on the channel that gave rise to
+            # the spike:
+            l = ns.channel
+            if ns.negative:
+                l = -l
+            dbobj.set_spike_channel(spikeid, l)
+            iprev = i
+        i = i + 1
+        if spikeid-previd >= 100:
+            print( '{} '.format(spikeid), end="")
+            sys.stdout.flush()
+            previd = spikeid
+
+cmd = ' '.join(sys.argv)
+iprint("logging: {}".format(cmd))
+dbobj.add_history('"{}"'.format(cmd))
+dbobj.close()

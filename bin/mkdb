@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+
+import sys
+import math
+import argparse
+import os.path
+import ndk.ds
+import ndk.es.db3 as db
+from ndk.ui import iprint,wprint,eprint
+import os
+
+# mkdb initializes an sqlite3 database file using a recording file.
+# It initializes or checks the file's 'meta' table and verifies or
+# adds to the basis table.  It will refuse to do anything if there are
+# inconsistencies.
+
+# Sigma and width below are initialized to defaults that SEEM to work
+# well for FI Vagus neurograms.  We need a more general way of pulling
+# features out of LFP recordings.
+
+parser = argparse.ArgumentParser(description='Create an sqlite3 database file for an LFP recording.')
+parser.add_argument('filename',  metavar='FILE', nargs=1, help='URI or filename for a recording to process.  If relative pathnames are desired, filename must start with a dot.')
+parser.add_argument('-sigma', type=float, default=8, help='Sigma for the gaussian generator function in SAMPLES.')
+parser.add_argument('-width', type=int, default=48, help='Window width in SAMPLES.')
+parser.add_argument('-offset', type=float, default=0, help='Offset (lag) for the generator function in samples.  Default is 0')
+parser.add_argument('-basisid', type=int, default=0, help='Basis ID.')
+parser.add_argument('-nfuncs', type=int, default=6, help='Number of basis functions.')
+parser.add_argument('-db', default=None)
+parser.add_argument('-uri',default=None)
+ns = parser.parse_args()
+
+if ns.db == None:
+    print( "You must supply a database name." )
+    exit()
+
+# How safe is this?
+#fname = os.path.abspath(ns.filename[0])
+fname = ns.filename[0]
+iprint('Filename = {}'.format(fname))
+if ns.uri is None:
+    suffix = fname.split('.')[-1]
+    if fname[0] != '/':
+        uri = suffix + '://localhost/' + fname
+    else:
+        uri = suffix + '://localhost' + fname
+    iprint('URI: ' + uri)
+else:
+    uri = ns.uri
+
+dbobj = db.open_event_store(ns.db, create=True)
+
+info = ndk.ds.read_raw_data(fname)
+lfp_vec = info[0]
+samprate = info[1]
+t0 = info[2]
+t1 = info[3]
+seg = info[4]
+events = None
+if len(info) > 5:
+    iprint('Found events:')
+    events = info[5]
+    for x in events:
+        iprint("{}".format(x))
+
+
+nchannels = len(lfp_vec)
+
+# New policy:  All tables are created here:
+dbobj.make_all_tables()
+#dbobj.make_basis_table()
+#dbobj.make_functions_table()
+#dbobj.make_properties_table()
+dbobj.set_property('start_time', str(t0))
+#dbobj.set_property('end_time', str(t1*samprate))
+dbobj.set_property('end_time', str(t1))
+
+if events:
+    iprint('Adding events: {}'.format(events))
+    for (ts, label) in events:
+        l = label.split('\n')
+        iprint('{}: {}'.format(ts, l[0]))
+        dbobj.add_event(l[0], ts)
+
+iprint( "sample rate = {}; nchannels = {}; uri = {}".format(samprate, nchannels, uri ))
+
+r = dbobj.make_meta_table(samprate, nchannels, uri)
+if not r:
+    eprint( "Something's wrong with this db file.  Unable to validate metadata." )
+else:
+    r = dbobj.add_basis(ns.basisid, ns.sigma, ns.width, nfuncs=ns.nfuncs, offset=ns.offset)
+    if not r:
+        wprint( "Couldn't add the default basis set!" )
+
+cmd = ' '.join(sys.argv)
+iprint("logging: {}".format(cmd))
+dbobj.add_history('"{}"'.format(cmd))
+dbobj.close()

@@ -1,0 +1,75 @@
+catnip:/export/home/catnip2/connolly/Desktop/Projects/Current/MNEMONIC/P01> 
+catnip:/export/home/catnip2/connolly/Desktop/Projects/Current/MNEMONIC/P01> ls
+VOL_160726_2359_B_I.pws*  Vol_P01(YM).edf*
+catnip:/export/home/catnip2/connolly/Desktop/Projects/Current/MNEMONIC/P01> python
+Python 2.7.6 (default, Jun 22 2015, 17:58:13) 
+[GCC 4.8.2] on linux2
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import ndk.ds
+>>> f = ndk.ds.edf_in.Edf('Vol_P01(YM).edf')
+>>> f
+<ndk.ds.edf_in.Edf instance at 0x7f8d307cc878>
+>>> f._read_data(1,0,100)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: Edf instance has no attribute '_read_data'
+>>> f._read_dat(1,0,100)
+array([-6188, -6119, -6023, -5919, -5825, -5757, -5718, -5701, -5694,
+       -5688, -5682, -5681, -5694, -5722, -5759, -5791, -5803, -5788,
+       -5752, -5710, -5682, -5678, -5699, -5730, -5757, -5766, -5756,
+       -5736, -5719, -5713, -5717, -5724, -5723, -5710, -5690, -5673,
+       -5669, -5678, -5693, -5696, -5676, -5630, -5573, -5528, -5518,
+       -5552, -5619, -5694, -5746, -5753, -5716, -5654, -5600, -5584,
+       -5619, -5692, -5771, -5816, -5801, -5722, -5599, -5467, -5358,
+       -5287, -5243, -5200, -5134, -5039, -4931, -4846, -4817, -4857,
+       -4948, -5050, -5120, -5131, -5090, -5027, -4984, -4990, -5045,
+       -5125, -5196, -5233, -5234, -5218, -5212, -5235, -5285, -5344,
+       -5387, -5398, -5378, -5342, -5310, -5298, -5308, -5332, -5361, -5387], dtype=int16)
+>>> f.close()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: Edf instance has no attribute 'close'
+>>> f,hdr = ndk.ds.edf_in.Edf('Vol_P01(YM).edf')
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+TypeError: iteration over non-sequence
+>>> f
+<ndk.ds.edf_in.Edf instance at 0x7f8d307cc878>
+>>> hdr
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'hdr' is not defined
+>>> f.hdr
+{'physical_min': array([-6822.05, -2787.61, -2692.77, -2574.1 , -3541.12, -2563.72,
+       -4149.68, -2533.8 , -2874.15, -2525.96, -2507.05, -2303.15,
+       -2619.98, -2629.59, -2546.84, -9546.08, -1230.6 ,     0.  ]), 'record_length': 1.0, 'physical_dim': [u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV', u'uV'], 'physical_max': array([  6.60809000e+03,   4.05798000e+03,   1.99769000e+03,
+         1.91603000e+03,   2.47881000e+03,   1.91969000e+03,
+         2.64426000e+03,   1.92647000e+03,   2.56214000e+03,
+         2.12873000e+03,   2.69701000e+03,   2.36589000e+03,
+         3.17071000e+03,   2.08671000e+03,   1.76862000e+03,
+         1.12952000e+04,   2.76925000e+03,   1.00000000e+00]), 'subject_id': u'X X 13-May-1951 Anonymous', 'n_channels': 18, 'n_records': 28775, 'n_samples_per_record': [250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250], 'label': [u'Fpz', u'LOCR', u'LOCL', u'F4', u'F3', u'C4', u'C3', u'P4', u'P3', u'O2', u'O1', u'M2', u'CHL', u'CHM', u'CHR', u'EKG', u'Trigger', u'Status'], 'digital_max': array([ 32767.,  32767.,  32767.,  32767.,  32767.,  32767.,  32767.,
+        32767.,  32767.,  32767.,  32767.,  32767.,  32767.,  32767.,
+        32767.,  32767.,  32767.,  32767.]), 'prefiltering': [u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN', u'LP:   NaN Hz; HP:   NaN Hz; Notch: NaN'], 'transducer': [u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u'', u''], 'recording_id': u'Startdate 27-Jul-2016', 'header_n_bytes': 4864, 'start_time': datetime.datetime(2016, 7, 27, 10, 30, 34), 'digital_min': array([-32768., -32768., -32768., -32768., -32768., -32768., -32768.,
+       -32768., -32768., -32768., -32768., -32768., -32768., -32768.,
+       -32768., -32768., -32768., -32768.])}
+>>> f.hdr['n_channels']
+18
+>>> f.hdr['n_records']
+28775
+>>> x = f.return_dat(0, 0, 28000)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/usr/local/lib/python2.7/dist-packages/ndk/ds/edf_in.py", line 238, in return_dat
+    dat = empty(shape=(len(chan), endsam - begsam), dtype='float64')
+TypeError: object of type 'int' has no len()
+>>> x = f._read_dat(0, 0, 28000)
+>>> x
+array([417, 445, 471, ..., 522, 517, 511], dtype=int16)
+>>> len(x)
+28000
+>>> x = f._read_dat(0, 0, 28000*250)
+>>> x
+array([417, 445, 471, ..., 178, 256, 323], dtype=int16)
+>>> len(x)
+7000000
+>>> 

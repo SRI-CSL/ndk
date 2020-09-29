@@ -1,0 +1,308 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+#
+# Theano version of the event (spike) sorter - runs much faster than
+# the original scipy convolution routine.
+import sys
+import ndk.ds
+import ndk.features
+from ndk.features import find_threshold_hist, find_threshold_snr, butter_filter_spikes
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+import numpy as np
+from scipy.signal import convolve, decimate
+import theano
+import theano.tensor as tensor
+from theano.tensor.nnet import conv2d
+from uritools import urisplit
+
+
+# mkspikes populates a database file with spike times and spike basis
+# numbers.  These correspond to the 'spiketimes' and 'spikebasis'
+# tables.  Because a correlation is already being performed to score
+# the spikes, we can also partially fill in the spike coefficient
+# table.
+
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-basisid', type=int, default=0, help='Basis ID.')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for spike extraction.')
+parser.add_argument('-percent', type=float, default=99, help='Rejection percentage.  Th bottom p% of spikes are rejected.  p=99% by default.')
+parser.add_argument('-overlap', default="off", help='If "on", allow overlap in spike windows.')
+parser.add_argument('-filter',  default=None, help='If provided, low:high frequency cutoffs for bandpass filter.')
+parser.add_argument('-gain',  default=1.0, help='Multiply the coefficients by the given gain.')
+parser.add_argument('-comp', default=None, help='Comma-separated list of components to use for scoring.  Default is all components.')
+parser.add_argument('-clear', dest='clear', action='store_true', help='If provided, will clear db tables before computation.')
+ns = parser.parse_args()
+
+
+#  Detection of fast spikes and filtering:
+#
+#  CervicalVagusRecording7 = no filtering works fine.
+#  CervicalVagusRecording9 = 1500:6000
+
+# Not clear if this is working:
+allow_overlap = (ns.overlap == "on")
+
+dbname = ns.files[0]
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+if ns.filter is None:
+    filter = False
+    print( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filter = True
+    [lowstr, highstr] = ns.filter.split(':')
+    lo = int(lowstr)
+    hi = int(highstr)
+    print( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+
+gain = ns.gain
+    
+# Provenance: all event sources provide basic metadata and point to a
+# data source:
+samprate, nchannels, uristring = dbobj.get_metadata()
+print( samprate, nchannels, uristring )
+
+# Create the tables if necessary:
+dbobj.make_spiketimes_table()
+dbobj.make_spikebasis_table()
+dbobj.make_spikecoefs_table()
+
+if ns.clear:
+    print('Clearing times, basisIDs and coefs...')
+    dbobj.clear_spike_times()
+    dbobj.clear_spike_basisids()
+    dbobj.clear_spike_coefs()
+
+# Parse the data source URI and open it:
+smr = urisplit(uristring)
+recfile = smr.path
+print(recfile)
+lfp_vec, samprate, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+nchannels = len(lfp_vec)
+
+#
+# Compute the default basis set:
+#
+seq = dbobj.get_basis(ns.basisid)
+width = len(seq[0])
+nfilt = len(seq)
+
+p = ns.percent / 100.0
+
+print( "Using {} basis components to score the dataset.".format(nfilt) )
+
+# In this code, we are using one specific channel.  In general, we
+# probably want to use multiple channels, but this is not yet
+# implemented:
+sig = np.asarray(lfp_vec[ns.channel])
+if filter:
+    sig = butter_filter_spikes(sig, lo, hi, samprate)
+
+npts = len(sig)
+
+def spike_peaks_lite(sig, dsig, threshold):
+    npts = len(sig)
+    upvec = sig > threshold
+    sys.stdout.flush()
+
+    zc = np.zeros(npts)
+
+    numzc = 0
+    numup = 0
+    tick = npts / 100
+    for i in range(1,npts-1):
+        if ( upvec[i] ):
+            numup += 1
+            if (dsig[i] == 0 or dsig[i]*dsig[i-1] < 0):
+                zc[i] = sig[i]
+                numzc += 1
+        if ( i % tick == 0 ):
+            print( '{}% ({})'.format(i/tick, numzc), end="")
+            sys.stdout.flush()
+
+    print( ' ' )
+    print( '{} Zero-crossings of first derivative computed (of {} candidates).'.format(numzc, numup) )
+    sys.stdout.flush()
+    return zc
+
+
+def check_for_zero(sig, d1, d2, threshold):
+    out = 0
+    if sig > threshold:
+        if d1 == 0 or d1*d2 < 0:
+            out = sig
+    return out
+
+#
+# Instead of using scan, can we be more clever about using arithmetic
+# and vector shifting?
+
+def spike_peaks_lite2(sig, dsig, threshold):
+    # We suffer when we use this version.  Don't know why...
+    sig_in = tensor.vector('sig_in', dtype='float32')
+    dsig_in = tensor.vector('dsig_in', dtype='float32')
+    result =  tensor.vector('result', dtype='float32')
+    x = tensor.scalar('x')
+
+    sy = tensor.switch( tensor.gt(sig_in, x), sig_in, 0 )
+    zy1 = tensor.switch( tensor.isclose(dsig_in, 0), 1, 0 )
+    y = dsig_in[:-1] * dsig_in[1:]
+    y2 = tensor.concatenate([y, tensor.stack(0)])
+    zy2 = tensor.switch( tensor.lt(y2, 0), 1, 0 )
+    zy = zy1 + zy2
+
+    result = zy * sy
+
+    sp_find_zc = theano.function(inputs=[sig_in, dsig_in, x], outputs=result, allow_input_downcast=True)
+
+    zc = sp_find_zc(sig, dsig, threshold)
+
+    return zc
+
+
+####################################################################
+# Define the Theano computation here:
+#
+# Think of this as a 2d correlation, where the LFP is correlated with
+# a 2d [m,W] basis set.
+#
+
+#=== f1 is for correlating the basis functions with the signal, and
+#    for computing an overall spike score with respect to a specific
+#    basis:
+
+if ns.comp == None:
+    components = range(nfilt)
+else:
+    components = [ int(x) for x in ns.comp.split(',')]
+
+print( components )
+
+in1 = tensor.tensor4('in1', dtype='float32')  # Input signal (could be multichannel here!)
+kt =  tensor.tensor4('kt', dtype='float32')   # Basis functions
+
+yt = conv2d(in1, kt, border_mode='half', filter_flip=False) # filter_flip=False means correlate
+ye = yt * yt       # Squared magnitude of each component
+
+# This could be implemented as a matrix multiply in Theano, but let's pull it out for now:
+# first = True
+#for ci in components:
+#    if first:
+#        y = ye[0,ci,0,:]
+#    else:
+#        y[0,0,0,:] += ye[0,ci,0,:]
+# y  = ye.sum(axis=1) # Compute sum of squares to generate the score.
+
+# f1 returns score elements ye and coefficients yt:
+f1 = theano.function([in1, kt], [ye, yt])
+
+
+#=== f2 is for finding peaks of the score function:
+
+in2 = tensor.tensor4('in2', dtype='float32')  # Input is the score function ('y' of f1)
+g  = tensor.tensor4('g', dtype='float32')     # Gaussian filter
+d  = tensor.tensor4('d', dtype='float32')     # derivative operator (3-point difference)
+
+gy = conv2d( in2, g, border_mode='half')
+dy = conv2d(  gy, d, border_mode='half')
+
+# f2 returns smoothed
+f2 = theano.function([in2, g, d], dy)
+#
+####################################################################
+
+print( "Convolving...", end="")
+sys.stdout.flush()
+kernel   = np.array(seq, dtype=np.float32).reshape(nfilt,1,1,width)
+data     = np.asarray(sig.reshape(1,1,1,npts), dtype=np.float32)
+r, coefs = f1( data, kernel )
+k = r.shape[3]
+
+print( kernel.shape )
+print( coefs.shape )
+print( r.shape )
+
+y = np.zeros(k, dtype=np.float32)
+for ci in components:
+    y[:] += r[0,ci,0,:]
+
+g1 = ndk.features.gauss_kernel(31, 6.0)
+g = g1.reshape(1,1,1,31)
+d = np.asarray([0.5, 0.0, -0.5], dtype=np.float32).reshape(1,1,1,3)
+#dr = f2(r.reshape(1,1,1,k), g, d)
+dr = f2(y.reshape(1,1,1,k), g, d)
+
+
+#r  =  r.reshape(k)
+r = y
+dr = dr.reshape(k)
+
+print ( 'done.  output shape={}'.format( dr.shape ) )
+print( "Scoring complete.  Selecting top {} % of peaks.".format(100.0-p*100.0) )
+
+
+# Histogram-based threshold selection: Assumes that "useful" spikes
+# appear only in the top x% of signal values.  This needs to be
+# validated and compared to RMS-error-based threshold selection.
+#
+# 1) Find the min and max values in array
+# 2) Histogram the array
+# 3) Find the threshold that eliminates the given fraction of histogram mass
+#
+
+nbins = 500
+print( 'r min / max: {} {}'.format(r.min(), r.max()))
+thresh = find_threshold_hist(r, nbins, p)
+print( 'threshold = {}'.format(thresh) )
+zc = spike_peaks_lite( r, dr, thresh )
+last = len(zc)
+print( 'Adding spikes to db...')
+
+# why 16??
+ts = t0 - 16
+dt = 1
+i = 0
+iprev = 0
+spikeid = -1
+printed = False
+previd = 0
+while ( i < last ):
+    # spikep = False
+    spikep = (zc[i] != 0)
+
+    if (spikep):
+        # The timestamp is in units of SAMPLES.
+        ts = t0 + i*dt
+        if ( allow_overlap or ( (i-iprev) > width ) ):
+            spikeid += 1
+            dbobj.set_spike_time(spikeid, ts)
+            dbobj.set_spike_basisid(spikeid, ns.basisid)
+            dbobj.set_spike_coefs(spikeid, ns.channel, coefs[0,:,0,i])
+            iprev = i
+    i = i + 1
+    if spikeid-previd >= 100:
+        print( '{} '.format(spikeid), end='')
+        sys.stdout.flush()
+        previd = spikeid
+
+print( ' ' )
+
+dbobj.close()

@@ -1,0 +1,499 @@
+#!/usr/bin/env python
+
+
+import sys
+import ndk.es.db3 as db
+import math
+from math import sin, cos
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+from mpl_toolkits.mplot3d import Axes3D
+
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from OpenGL.GLU import *
+
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.') 
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-coef', type=int, default=None, help='Render the coefficient value.')
+parser.add_argument('-alpha', type=float, default=0.05, help='Alpha value for showing firing rates (default=0.1).')
+ns = parser.parse_args()
+
+
+#
+# This object needs a refresh operation to account for re-clustering:
+#
+class Viewer():
+    def __init__(self, nunits, colors, times, width=1024, height=300):
+        self.numbits = [
+            [ 0x00,0x00,0x00,0x00,0x00,0x00,0xc0,0x01,0x20,0x02,0x10,0x04,0x10,0x04,0x10,
+              0x04,0x10,0x04,0x10,0x04,0x10,0x04,0x20,0x02,0xc0,0x01,0x00,0x00,0x00,0x00,
+              0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xf0,0x07,0x80,0x00,0x80,0x00,0x80,0x00,0x80,
+             0x00,0x80,0x00,0x90,0x00,0xa0,0x00,0xc0,0x00,0x80,0x00,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xf0,0x07,0x10,0x00,0x20,0x00,0xc0,0x00,0x00,
+             0x01,0x00,0x02,0x00,0x04,0x10,0x04,0x10,0x04,0xe0,0x03,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xe0,0x03,0x10,0x04,0x00,0x04,0x00,0x04,0x00,
+             0x04,0x80,0x03,0x00,0x01,0x00,0x02,0x00,0x04,0xf0,0x07,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x02,0xf0,0x07,0x10,
+             0x02,0x20,0x02,0x40,0x02,0x80,0x02,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xe0,0x03,0x10,0x04,0x00,0x04,0x00,0x04,0x00,
+             0x04,0x30,0x04,0xd0,0x03,0x10,0x00,0x10,0x00,0xf0,0x07,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xe0,0x03,0x10,0x04,0x10,0x04,0x10,0x04,0x30,
+             0x04,0xd0,0x03,0x10,0x00,0x10,0x00,0x20,0x00,0xc0,0x03,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0x20,0x00,0x20,0x00,0x40,0x00,0x40,0x00,0x80,
+             0x00,0x00,0x01,0x00,0x02,0x00,0x04,0x00,0x04,0xf0,0x07,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xc0,0x01,0x20,0x02,0x10,0x04,0x10,0x04,0x20,
+             0x02,0xc0,0x01,0x20,0x02,0x10,0x04,0x20,0x02,0xc0,0x01,0x00,0x00,0x00,0x00,
+             0x00,0x00],
+            [0x00,0x00,0x00,0x00,0x00,0x00,0xe0,0x01,0x00,0x02,0x00,0x04,0x00,0x04,0xe0,
+             0x05,0x10,0x06,0x10,0x04,0x10,0x04,0x10,0x04,0xe0,0x03,0x00,0x00,0x00,0x00,
+             0x00,0x00]
+            ]
+        self.tx = 0.0
+        self.ty = 0.0
+        self.prev_mouse_x = 0
+        self.prev_mouse_y = 0
+        self.xw = width
+        # self.yw = height
+        self.yw = 25 * nunits
+        self.active = [ False for k in range(nunits) ]
+        self.times = times
+        self.colors = colors
+        self.nunits = nunits
+        # self.t_scale = 10.0/2500.0
+        self.t_scale = 1.0e-01  # 
+        self.mode = 't'
+        self.y_offset = 1.0
+        self.y_scale = 5.0 # 0.20
+        self.y_margin = 0.15
+        self.use_amp = False
+        self.amp = None
+        self.show_wave = True
+        self.alpha = ns.alpha
+        self.amax = 1.0
+        self.events = {}
+        self.colortab = ( (1.0, 0.0, 0.0),
+                          (0.0, 1.0, 0.0),
+                          (1.0, 1.0, 0.0),
+                          (0.0, 0.0, 1.0),
+                          (1.0, 0.0, 1.0),
+                          (0.0, 1.0, 1.0),
+                          (1.0, 1.0, 1.0)
+                      )
+
+    # Initializes the GL display environment:
+    def glInit(self):
+        glutInit()
+        glutInitWindowSize(self.xw, self.yw)
+        glutCreateWindow("Spike Rasters for {}".format(ns.files[0]))
+        glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB)
+        # Display callback:
+        glutDisplayFunc(self.displayFun)
+
+        # Interaction callbacks:
+        glutMouseFunc(self.mouseClickFun)
+        glutMotionFunc(self.mouseMotionFun)
+        glutKeyboardFunc(self.keyPress)
+        #    glutPassiveMotionFunc(passiveMouseFun)
+
+        # One-time GL setup:
+        glClearColor(0.0, 0.0, 0.0, 0.0)
+        glColor3f(0.0, 0.0, 0.0)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluOrtho2D(-0.5, 0.5, 0.0, self.yw)
+        glScaled(self.t_scale, self.y_scale, 1.0)
+
+
+    def unit_times(self, npts=1000):
+        t0, t1 = self.get_interval()
+        delta = float(t1 - t0) / float(npts)
+        v = np.zeros(npts)
+        time = t0
+        for i in range(len(v)):
+            v[i] = time
+            time += delta
+        return v
+
+    def unit_amp(self, u, npts=1000):
+        t0, t1 = self.get_interval()
+        v = np.zeros(npts)
+
+    def unit_count(self, u, npts=1000):
+        t0, t1 = self.get_interval()
+        bin = lambda x: int ( float(npts) * float(x-t0) / float(t1-t0) )
+        v = np.zeros(npts)
+        k = 0
+        for t in self.times:
+            if t0 <= t and t <= t1 and self.colors[k] == u:
+                i = bin(t)
+                try:
+                    v[i] += 1
+                except:
+                    pass
+        return v
+
+    def active_units(self):
+        l = []
+        for k in range(len(self.active)):
+            if self.active[k]:
+                l.append(k)
+        return l
+
+    def plot_active_units(self):
+        print("Plot units {}".format(self.active_units()))
+        #ax = plt.gca()
+        #ax.clear()
+        #ax.set_facecolor('black')
+        units = self.active_units()
+        base = len(units)*100 + 10 + 1
+        print("base={}".format(base))
+        k = 0
+        axes = []
+        time = self.unit_times()
+        for u in units:
+            # y = self.unit_amp(u)
+            z = self.unit_count(u)
+            print("len(z) = {}".format(len(z)))
+            #plt.subplot(base + k)
+            #a = plt.gca()
+            #a.clear()
+            #a.set_xlabel('Time')
+            #a.set_ylabel('Amplitude')
+            # a.set_ylabel2('Rate')
+            #a.grid(True)
+            # a.plot(time, y, color='red')
+            #a.plot(time, z, color='green')
+            #a.draw(renderer=renderer)
+            #axes.append(a)
+        #plt.show()
+
+        
+    def toggleUnit(self, y):
+        h = float(glutGet(GLUT_WINDOW_HEIGHT)) / float(self.nunits)
+        # print(h)
+        u = self.nunits - int(y/h) - 1
+        print("Toggle unit: {}".format(u))
+        try:
+            self.active[u] = not self.active[u]
+        except:
+            pass
+        glutPostRedisplay()
+            
+    def get_interval(self):
+        x = -self.tx -  5.0 / self.t_scale
+        y = -self.tx + 5.0 / self.t_scale
+        return x*samprate, y*samprate
+
+    def print_interval(self):
+        #x = -self.tx -  5.0 / self.t_scale
+        #y = -self.tx + 5.0 / self.t_scale
+        t0,t1 = self.get_interval()
+        print( t0, t1 )
+
+    # Not clear that we need all of these, but here's the keypress
+    # handler:
+    def keyPress(self, key, x, y):
+        print( key )
+        if key == b'q':
+            quit()
+        elif key == b'+':
+            self.zoom(1.2)
+        elif key == b'-':
+            self.zoom(0.8)
+        elif key == b'i':
+            self.print_interval()
+        #elif key == b'p':
+        #    self.plot_active_units()
+        glutPostRedisplay()
+
+
+    # When we press or release a mouse button, change interaction
+    # modes:
+    def mouseClickFun(self, button, state, x, y):
+        # print( "button = {}, state = {}".format(button, state) )
+        # print(x)
+        if state == 0:
+            if button == 0:
+                if x > 75:
+                    self.mode = 't'
+                    self.prev_mouse_x = x
+                    self.prev_mouse_y = y
+                else:
+                    self.toggleUnit(y)
+            elif button == 2:
+                self.mode = 'z'
+        else:
+            self.mode = 't'
+
+    # If the mouse moves while pressed, change the view:
+    def mouseMotionFun(self, xn, yn, tscale=0.01):
+        if self.mode == 't':
+            f = tscale / self.t_scale
+            self.tx += (xn - self.prev_mouse_x) * f
+            self.ty += (self.prev_mouse_y - yn) * f
+            self.prev_mouse_x = xn
+            self.prev_mouse_y = yn
+        glutPostRedisplay()
+
+    # Zoom in or out, depending on whether f is > or < 1:
+    def zoom(self, f):
+        self.t_scale = self.t_scale * f
+        glutPostRedisplay()
+
+    def drawTimeScale(self):
+        #x = -self.tx - 4.0 / self.t_scale
+        x = -self.tx - 1.0 / self.t_scale
+        y = self.nunits - 0.8
+        nw = 16
+        nh = 16
+
+        glColor4f(0.0,1.0,0.0,0.8)
+        glRasterPos2f(x+12.0, y)
+        # print(10.0 / self.t_scale)
+        num = int(10.0 / self.t_scale)  # = seconds?
+        l = []
+        while num >= 1:
+            r = int( num % 10 )
+            l.append(r)
+            num = int(num / 10)
+        l.reverse()
+        for k in l:
+            glBitmap(nw, nh, 0.0, 1.0, 8.0, 0.0, self.numbits[k])
+            #glBitmap(nw, nh, 0.0, 1.0, 8.0, 0.0, self.numbits[0])
+            #glBitmap(nw, nh, 0.0, 1.0, 8.0, 0.0, self.numbits[0])
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord(' '))
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord(' '))
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord(' '))
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord('s'))
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord('e'))
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord('c'))
+
+        glBegin(GL_LINES)
+        x0 = -self.tx - 4.9/self.t_scale
+        x1 = -self.tx + 4.9/self.t_scale
+        y -= 0.2
+        glVertex2f(x0, y)
+        glVertex2f(x1, y)
+        
+        # End arrows:
+        glVertex2f(x0, y)
+        glVertex2f(x0+0.5, y+0.2)
+
+        glVertex2f(x0, y)
+        glVertex2f(x0+0.5, y-0.2)
+
+        glVertex2f(x1, y)
+        glVertex2f(x1-0.5, y+0.2)
+
+        glVertex2f(x1, y)
+        glVertex2f(x1-0.5, y-0.2)
+
+        glEnd()
+        
+
+    def drawUnitNums(self):
+        nw = 16  # numeral width
+        nh = 16 # numeral height
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE)
+        glPixelStorei(GL_UNPACK_LSB_FIRST, GL_TRUE)
+        x = -self.tx -  4.5 / self.t_scale
+        for y in range(self.nunits):
+            if self.active[y]:
+                glColor4f(1.0, 1.0, 0.0, 0.9)
+            else:
+                glColor4f(1.0, 0.0, 1.0, 0.9)
+            glRasterPos2f(x, y + 0.2)
+            if y < 10:
+                glBitmap(nw, nh, 0.0, 1.0, 8.0, 0.0, self.numbits[y])
+            else:
+                glBitmap(nw, nh, 0.0, 1.0, 8.0, 0.0, self.numbits[int(y/10)])
+                glBitmap(nw, nh, 0.0, 1.0, 0.0, 0.0, self.numbits[y%10])
+
+    def drawEventName(self, x, y, string):
+        l = len(string)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE)
+        glPixelStorei(GL_UNPACK_LSB_FIRST, GL_TRUE)
+        glColor4f(0.9, 0.9, 0.0, 0.9)
+
+        glRasterPos2f(x, y)
+        for j in range(l):
+            k = ord(string[j])
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord(string[j]))
+
+
+
+    # Refresh the display.  We could do this with a display list, but
+    # this seems to be fast enough:
+    def displayFun(self):
+        glClear(GL_COLOR_BUFFER_BIT)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+        glColor3f(0,1,0)
+        glRectf(-5.0, 0.0, 5.0, self.yw)
+        glColor3f(0,0,0)
+        #    0.8*self.yw is not enough, but we don't really care at
+        #    this point:
+        glRectf(-4.98, 0.2, 4.98, 0.8*self.yw)
+
+        glTranslated(0.0, self.y_offset, 0.0)
+        glScaled(1.0, self.y_scale, 1.0)
+        glScaled(self.t_scale, 1.0, 1.0)
+        glTranslated(self.tx, 0.0, self.y_offset)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glBegin(GL_LINES)
+
+        # Start time fiducial:
+        glColor4d(0.4, 0.4, 0.0, 0.9)
+        glVertex2f(self.t0, -1)
+        glVertex2f(self.t0, self.nunits+1)
+
+        # End time fiducial:
+        glColor4d(0.0, 0.4, 0.4, 0.9)
+        glVertex2f(self.t1, -1)
+        glVertex2f(self.t1, self.nunits+1)
+
+        # Think about turning these into display lists:
+        # Draw raster separators:
+        glColor4d(0.0, 0.4, 0.0, 0.5)
+        for y in range(self.nunits):
+            glVertex2f(-self.t1, y)
+            glVertex2f(self.t1, y)
+
+        ncolors = len(self.colortab)
+
+        k = 0
+        for t in self.times:
+            ci = self.colors[k]
+            alpha = self.alpha
+            if self.show_wave and self.use_amp:
+                y0 = ci + self.y_margin
+                y1 = (ci + self.amp[k]) - self.y_margin
+            else:
+                y0 = ci + self.y_margin
+                y1 = (ci + 1.0) - self.y_margin
+            j = ci % ncolors
+            if not self.use_amp:
+                glColor4d(self.colortab[j][0], self.colortab[j][1], self.colortab[j][2], alpha)
+            else:
+                f = math.exp(2.0 * (self.amp[k]-1.0))
+                glColor4d(f*self.colortab[j][0], f*self.colortab[j][1], f*self.colortab[j][2], alpha)
+            glVertex2f(t, y0)
+            glVertex2f(t, y1)
+            k += 1
+                
+        # Add the external events:
+        for ts, name in self.events:
+            glColor4f(0.9, 0.9, 0.0, 0.8)
+            glVertex2f(ts, -1.0)
+            glVertex2f(ts, self.nunits+1)
+
+        glEnd()
+
+        y = self.nunits - 0.9
+        for ts, name in self.events:
+            self.drawEventName(ts, y, name)
+        self.drawUnitNums()
+        self.drawTimeScale()
+        glFlush()
+
+trans = False
+
+#if len(sys.argv) < 2:
+#    print( "Usage: vrasters <dbfile> [coef]" )
+#    quit()
+
+dbname = ns.files[0]
+
+#if len(sys.argv) > 2:
+#    trans = True
+#    cnum = int(sys.argv[2])
+#else:
+#    trans = False
+
+dbobj = db.open_event_store(dbname)
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchan, recfile = dbobj.get_metadata()
+
+#
+# Gather the data into vectors:
+#for k in range(nchannels):
+dbobj.execute('select label,samplenum from spikelabels join spiketimes where spikelabels.spikeID == spiketimes.spikeID order by spiketimes.samplenum;')
+r = dbobj.fetchall()
+npts = len(r)
+times = np.zeros(npts)
+nunits = 0
+print("Number of points: {}".format(npts))
+
+colors = []
+for j in range(npts):
+    color = r[j][0]
+    if color > nunits:
+        nunits = color
+    colors.append(color)
+    times[j] = r[j][1] / samprate
+
+
+nunits += 2
+v = Viewer(nunits, colors, times)
+v.t0 = times.min() 
+v.t1 = times.max() 
+e = dbobj.get_events()
+print(e)
+v.events = []
+for ts,name in e:
+    v.events.append((ts/samprate, name))
+print( v.t0,v.t1 )
+
+if ns.coef is None:
+    use_coefs = False
+else:
+    trans = True
+    use_coefs = True
+    cnum = ns.coef
+
+if trans:
+    v.show_wave = True
+    if not use_coefs:
+        print( "Getting spike waveform approximations" )
+        amp = dbobj.get_spike_amplitudes(0)
+    else:
+        print( 'Getting coefficient {}'.format(cnum) )
+        dbobj.execute('select coef from spikecoefs join spiketimes where spikecoefs.spikeID == spiketimes.spikeID and spikecoefs.channel == 0 and spikecoefs.cindex == {} order by spiketimes.samplenum;'.format(cnum))
+        r = dbobj.fetchall()
+        amp = np.zeros(npts)
+        for j in range(npts):
+            amp[j] = r[j][0]
+
+    amin = amp.min()
+    amax = amp.max()
+    v.amp = (amp - amin) / (amax - amin)
+    v.use_amp = True
+
+
+if __name__ == '__main__':
+    v.glInit()
+    v.tx = -0.5 * (v.t1-v.t0)
+    v.zoom(0.05)
+    glutMainLoop()
+
+dbobj.close()

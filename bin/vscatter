@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+
+import sys
+import ndk
+import ndk.es.db3
+import ndk.features
+import math
+from math import sin, cos
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from OpenGL.GLU import *
+
+# Think about adding -start and -end args here - want to visualize a
+# subset of spikes in time:
+
+parser = argparse.ArgumentParser(description='Visualize scatter plot of spikes using coefficient/channel space.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-basis', type=int, default=0, help='Basis to show.  If -1 is supplied, all bases are shown.')
+parser.add_argument('-channel', type=int, default=None, help='If provided, show only those points that came from the specified channel.')
+parser.add_argument('-pointsize', type=float, default=1.0, help='Size of the points in the scatter plot.')
+parser.add_argument('-coefs', default='0:2,1:2,2:2', help='Coefficients to use for clustering (<coef>:<chan>, default is 0:0,1:0,2:0).')
+parser.add_argument('-highlight', default=None, help='Time interval to highlight  by changing alpha.')
+parser.add_argument('-alpha', type=float, default=0.4, help='Alpha channel value for cluster translucency.')
+ns = parser.parse_args()
+dbname = ns.files[0]
+basis = ns.basis
+ps = ns.pointsize
+
+
+def setGLRotation(y, x, m):
+    # This implements two SUCCESSIVE rotations.
+    sx = sin(x)
+    sy = sin(y)
+    cx = cos(x)
+    cy = cos(y)
+    
+    m[0] = cy
+    m[1] = -sx*sy
+    m[2] = cx*sy
+    m[3] = 0.0
+    
+    m[4] = 0.0
+    m[5] = cx
+    m[6] = sx
+    m[7] = 0.0
+
+    m[8] = -sy
+    m[9] = -sx*cy
+    m[10] = cx*cy
+    m[11] = 0.0
+    
+    m[12] = 0.0
+    m[13] = 0.0
+    m[14] = 0.0
+    m[15] = 1.0
+
+
+class Viewer():
+
+    def __init__(self, dbobj, width=1024, height=768, window=128000):
+        # self.mode_alist = { 'q': quit , '+': zoom_in , '-': zoom_out }
+        # Window dimensions
+        self.ds = dbobj  # hmmm...
+        self.xw = width
+        self.yw = height
+        self.initialized = False
+        # Scatter plot rotation:
+        self.xrot = 0.0
+        self.yrot = 0.0
+        # Scatter plot translation:
+        self.tx = 0.0
+        self.ty = 0.0
+        # Measure mouse delta motion:
+        self.prev_mouse_x = 0
+        self.prev_mouse_y = 0
+        # Transformation matrix:
+        self.xform = np.zeros(16)
+        self.mode = 'rotate'
+        self.t0, self.t1 = dbobj.get_dataset_interval()
+        self.time_min = t0
+        self.time_x_scale = float(self.t1 - self.t0) / float(self.xw)
+        self.window = window
+        self.ts = []
+        self.pts = []
+        self.events = []
+        self.color = []
+        self.xscale = 1.0
+        self.yscale = 1.0
+        self.zscale = 1.0
+        self.alpha = ns.alpha
+        self.mode = 'r'
+        self.colortab = ( (1.0, 0.0, 0.0),
+                          (0.0, 1.0, 0.0),
+                          (1.0, 1.0, 0.0),
+                          (0.0, 0.0, 1.0),
+                          (1.0, 0.0, 1.0),
+                          (0.0, 1.0, 1.0),
+                          (1.0, 1.0, 1.0)
+                      )
+        self.colormask = []
+        setGLRotation(self.xrot, self.yrot, self.xform)
+
+    def set_interval(self, begin, end):
+        self.t0 = begin
+        self.t1 = end
+        print("New interval: {},{}".format(begin,end))
+        glutPostRedisplay()
+
+
+    # Should think about making this generic, i.e., applicable to any
+    # GL-based visualization of a DB dataset.  Initializes the GL
+    # display environment:
+    def glInit(self):
+        glutInit()
+        glutInitWindowSize(self.xw, self.yw)
+        glutCreateWindow("Spike Coefs")
+        glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB)
+        # Display callback:
+        glutDisplayFunc(self.displayFun)
+
+        # Interaction callbacks:
+        glutMouseFunc(self.mouseClickFun)
+        glutMotionFunc(self.mouseMotionFun)
+        glutKeyboardFunc(self.keyPress)
+        # glutPassiveMotionFunc(passiveMouseFun)
+
+        # One-time GL setup:
+        glClearColor(0.0,0.0,0.0,0.0)
+        glColor3f(0.0, 1.0, 0.0)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        #gluOrtho2D(0.0,xw,0.0,yw)
+        gluOrtho2D(-0.5, 0.5, -0.5, 0.5)
+        setGLRotation(0.0, 0.0, self.xform)
+        glScaled(self.xscale, self.yscale, self.zscale)
+        print("glInit finished")
+        sys.stdout.flush()
+        self.initialized = True
+
+    def refresh_colors(self, basis=0, channel=ns.channel):
+        self.color = self.ds.get_label_array(basis, channel)
+
+    def refresh_points(self, coefs, basis=0, relative=True):
+        if ns.channel is None:
+            next,ts = self.ds.get_coef_array(coefs, basis)
+            #ts = self.ds.get_spike_times(basis)
+        else:
+            next,ts = self.ds.get_coef_array(coefs, basis, ns.channel)
+            #ts = self.ds.get_spike_times(basis, ns.channel)
+        print( "Coef array shape = {}".format(next.shape) )
+        print( "Length of timestamps = {}".format(len(ts)))
+        #if next == None:
+        #    print( "No spikes are using basis {}.".format(basis) )
+        self.pts = next
+        self.ts = ts
+        if relative:
+            self.pts[0] = self.pts[0] - self.pts[0].mean()
+            self.pts[1] = self.pts[1] - self.pts[1].mean()
+            self.pts[2] = self.pts[2] - self.pts[2].mean()
+        self.refresh_colors(basis)
+
+    def maybe_toggle_color(self, key):
+        print(key)
+        if b'0' <= key and key <= b'f':
+            k = int(key, base=16)
+            if k in self.colormask:
+                self.colormask.remove(k)
+            else:
+                self.colormask.append(k)
+            print( self.colormask )
+            
+    # Not clear that we need all of these, but here's the keypress
+    # handler:
+    def keyPress(self, key, x, y):
+        if key == b'q':
+            quit()
+        elif key == b'+':
+            self.zoom(2.0)
+        elif key == b'-':
+            self.zoom(0.5)
+        elif key == b'x':
+            self.xscale = 0.5 * self.xscale
+        elif key == b'X':
+            self.xscale = 2.0 * self.xscale
+        elif key == b'y':
+            self.yscale = 0.5 * self.yscale
+        elif key == b'Y':
+            self.yscale = 2.0 * self.yscale
+        elif key == b'z':
+            self.zscale = 0.5 * self.zscale
+        elif key == b'Z':
+            self.zscale = 2.0 * self.zscale
+        elif key == b'.':
+            if self.mode == '.':
+                print("Rotation mode")
+                self.mode = 'r'
+            else:
+                print("Temporal mode")
+                self.mode = '.'
+        elif key == b'r':
+            self.tx = 0.0
+            self.ty = 0.0
+            self.mode = 'r'
+            self.xscale = 1.0
+            self.yscale = 1.0
+            self.zscale = 1.0
+        elif key == b'*':
+            xs = self.pts[0].max() - self.pts[0].mean()
+            ys = self.pts[1].max() - self.pts[1].mean()
+            zs = self.pts[2].max() - self.pts[2].mean()
+            print( xs, ys, zs )
+            if ys > 0:
+                self.yscale = xs / ys
+            if zs > 0:
+                self.zscale = xs / zs
+            print( self.xscale, self.yscale, self.zscale )
+        elif key == b' ':
+            self.refresh_colors(ns.basis)
+        else:
+            self.maybe_toggle_color(key)
+        if self.initialized:
+            glutPostRedisplay()
+
+
+    def map_x_to_time(self, x):
+        return int( (x * self.time_x_scale) + self.time_min )
+
+    # When we press or release a mouse button, change interaction
+    # modes:
+    def mouseClickFun(self, button, state, x, y):
+        print( "button = {}, state = {}".format(button, state) )
+        # print("x,y = {},{}".format(x, y))
+        if state == 0:
+            if button == 0:
+                if self.mode != '.':
+                    self.mode = 'r'
+            elif button == 2:
+                self.mode = 't'
+                self.prev_mouse_x = x
+                self.prev_mouse_y = y
+        else:
+            self.mode = 'r'
+
+    # If the mouse moves while pressed, change the view:
+    def mouseMotionFun(self, xn, yn, rscale=3.1415/360.0, tscale=0.001):
+        # print("x,y = {},{}".format(xn, yn))
+        if self.yw-yn < 20 or self.mode == '.':
+            ts = self.map_x_to_time(xn)
+            self.set_interval(ts-self.window, ts+self.window)
+        elif self.mode == 'r':
+            self.xrot = -(xn-256.0)*rscale
+            self.yrot = (yn-256.0)*rscale
+            setGLRotation(self.xrot, self.yrot, self.xform)
+        elif self.mode == 't':
+            self.tx += (xn - self.prev_mouse_x) * tscale
+            self.ty += (self.prev_mouse_y - yn) * tscale
+            self.prev_mouse_x = xn
+            self.prev_mouse_y = yn
+        if self.initialized:
+            glutPostRedisplay()
+
+    # Zoom in or out, depending on whether f is > or < 1:
+    def zoom(self, f):
+        self.xscale = self.xscale * f
+        self.yscale = self.yscale * f
+        self.zscale = self.zscale * f
+        if self.initialized:
+            glutPostRedisplay()
+
+    # Refresh the display.  We could do this with a display list, but
+    # this seems to be fast enough:
+    def displayFun(self):
+        glClear(GL_COLOR_BUFFER_BIT)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor3f(0,1,0)
+        glRectf(-0.5, -0.5, 0.5, 0.5)
+        glColor3f(0,0,0)
+        glRectf(-0.498, -0.498, 0.498, 0.498)
+#       print( self.xscale, self.yscale, self.zscale )
+        glColor3f(1,1,0)
+        frac = float(self.yw-20)/float(self.yw)
+        # print(frac)
+        glRectf(-0.5, -(frac-0.5), 0.5, -0.5)
+        glMultMatrixf(self.xform)
+        glScaled(self.xscale, self.yscale, self.zscale)
+        glTranslated(self.tx, self.ty, 0.0)
+        glPointSize(ps)
+        glBegin(GL_POINTS)
+        glColor3f(1,0,0)
+        l = self.pts
+        (nc, npts) = l.shape
+        for k in range(npts):
+            if self.t0 <= self.ts[k] and self.ts[k] < self.t1:
+                alpha = self.alpha
+            else:
+                alpha = 0.01
+            if (len(self.color)) > 0:
+                if k < len(self.color):
+                    c = self.color[k]
+                else:
+                    c = self.color[0]
+                if c not in self.colormask:
+                    ci = c % 7
+                    glColor4d(self.colortab[ci][0], self.colortab[ci][1], self.colortab[ci][2], alpha)
+                    glVertex3f(l[0][k], l[1][k], l[2][k])
+        glEnd()
+        glFlush()
+
+
+
+
+# Use matplotlib to create a scatter plot of spike event using their
+# basis coefficients.  This is not very fast, so we should consider
+# gluing the OpenGL display approach onto python.  Recommend trying
+# pygame for this.
+
+dbobj = ndk.es.db3.open_event_store(dbname)
+
+t0, t1 = dbobj.get_dataset_interval()
+if ns.highlight is not None:
+    s = ns.highlight.split(':')
+    t0 = int(s[0])
+    t1 = int(s[1])
+interval = (t0, t1)
+
+
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, recfile = dbobj.get_metadata()
+
+coef_spec = ns.coefs
+coef = ndk.features.parse_coef_spec(coef_spec)
+
+if dbobj.get_waveform_count(ns.channel) <= 0:
+    print( "There are no waveform coefficients in this file.  Use mkcoefs to add them." )
+else:
+    v = Viewer(dbobj, window=10*samprate)
+    v.glInit()
+    v.set_interval(t0, t1)
+    print( "Basis: {}".format( basis ) )
+    v.refresh_points(coef, basis)
+
+    if __name__ == '__main__':
+        glutMainLoop()
+
+dbobj.close()
+
+

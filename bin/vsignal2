@@ -1,0 +1,458 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+from matplotlib.widgets import Slider, Button
+from scipy.signal import convolve, freqz
+
+# Probably doesn't work on Windows:
+# matplotlib.use('GTKAgg')
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+
+global spike, nspikes, sl, lo, hi, samprate
+
+parser = argparse.ArgumentParser(description='Plot all waveforms for a given cluster and channel.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-channel', type=int, default=0, help='Use the given channel.  Default is 0 (first channel).')
+parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, attempts to overlay raw data.')
+parser.add_argument('-cooked', dest='cooked', action='store_true', help='If provided, plots the db-generated waveforms.')
+parser.add_argument('-filter',  default="100:3000")
+#parser.add_argument('-low', default=None, help='If provided, low cutoff freq. for high-pass filter.')
+#parser.add_argument('-high', default=None, help='If provided, high cutoff freq. for low-pass filter.')
+ns = parser.parse_args()
+
+lo = None
+hi = None
+filtering = False
+
+if ns.filter.find(':') == -1:
+    filtering = False
+    print( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filtering = True
+    [lowstr, highstr] = ns.filter.split(':')
+    if len(lowstr) == 0:
+        loi = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+    print( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+
+if not ns.raw:
+    # Plot something:
+    ns.cooked = True
+    
+#
+# Thrown together really fast and loose - the Cursor object needs to
+# be cleaned up and we need to have bona fide display-able State
+# objects:
+#
+
+def set_right(poly, new_x):
+    ndarray = poly.get_xy()
+    xarray = ndarray[:,0]
+    xm = xarray[0]
+    for x in xarray:
+        if x > xm:
+            xm = x
+    for i in range(0,len(xarray)):
+        if xarray[i] == xm:
+            xarray[i] = new_x
+    poly.set_xy(ndarray)
+
+
+def get_limits(poly):
+    ndarray = poly.get_xy()
+    xarray = ndarray[:,0]
+    xm = xarray[0]
+    xmin = None
+    xmax = None
+    for x in xarray:
+        if xmin is None:
+            xmin = x
+            xmax = x
+        if x > xmax:
+            xmax = x
+        if x < xmin:
+            xmin = x
+    return (int(xmin), int(xmax))
+            
+            
+
+class Cursor(object):
+    def __init__(self, es, channel, ax1, ds=None):
+        self.state_list = []
+        self.t0, self.t1 = es.get_dataset_interval()
+        self.marking = False
+        self.npts = 16534
+        self.xprev = 0
+        self.xdelta = self.npts
+        self.x0 = self.t0
+        self.x1 = self.t0 + self.xdelta
+        self.press = None
+        self.es = es
+        self.ds = ds
+        self.chan = channel
+        self.dec = 1
+        self.yscale = 1.0
+        self.autoscale = True
+        self.drag = False
+        self.seq = es.get_basis(0)
+        self.r1 = None
+        if ns.cooked:
+            self.x = self.es.get_signal(self.chan, self.x0, self.x0 + self.xdelta)
+            if self.dec > 1:
+                self.x = downsample(self.x, self.dec)
+        else:
+            self.x = np.zeros(self.npts)
+            self.x[:] = 0.0
+            
+        if ds == None:
+            self.y = np.zeros(self.npts)
+        else:
+            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            if self.dec > 1:
+                self.x = downsample(self.x, self.dec)
+
+        self.ymin = self.x.min()
+        self.ymax = self.x.max()
+
+        self.time = np.zeros(self.npts)
+        self.time = self.set_time()
+        # Plotting the current values:
+        self.ax1 = ax1
+        ax1.plot(self.time, self.x, color='blue')
+        ax1.plot(self.time, self.y, color='red')
+        ax1.set_xlabel("Time (samples)")
+        #ax1.set_xlim([self.x0, self.x0+self.npts])
+        #ax1.set_xlim([0, len(self.x)])
+        plt.subplots_adjust(bottom=0.2)
+
+        axprev = plt.axes([0.1,0.05,0.05,0.075])
+        self.bprev = Button(axprev, 'Prev')
+        self.bprev.on_clicked(self.prev)
+
+        axpfast = plt.axes([0.16,0.05,0.05,0.075])
+        self.bpfast = Button(axpfast, '<<')
+        self.bpfast.on_clicked(lambda(event): self.prev(event, 60*samprate))
+
+        axsave = plt.axes([0.25,0.05,0.05,0.075])
+        self.bsave = Button(axsave, 'Save')
+        self.bsave.on_clicked(self.save)
+
+        axnfast = plt.axes([0.75,0.05,0.05,0.075])
+        self.bnfast = Button(axnfast, '>>')
+        self.bnfast.on_clicked(lambda(event): self.next(event, 60*samprate))
+        axnext = plt.axes([0.81,0.05,0.05,0.075])
+        self.bnext = Button(axnext, 'Next')
+        self.bnext.on_clicked(self.next)
+
+
+
+    def reshape_x(self, new_npts):
+        print( new_npts )
+        self.npts = new_npts
+        if ns.cooked:
+            self.x = self.es.get_signal(self.chan, self.x0, self.x0 + self.npts)
+        if ns.raw:
+            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+        else:
+            self.y = np.zeros(self.npts)
+        self.refresh(self.x0)
+
+
+    def set_time(self, t=None, units='samples'):
+        if t == None:
+            t = np.zeros(self.npts)
+        v = self.x0
+        if units == 'samples':
+            dx = 1
+        elif units == 'ms':
+            dx = 1000.0 / samprate
+        elif units == 'sec':
+            dx = 1.0 / samprate
+        else:
+            dx = 1
+
+        for k in range(self.npts):
+            t[k] = v
+            v += dx
+        return t
+    
+
+    def xticks(self, n):
+        v = self.x0
+        x = []
+        dx = (self.npts / n)
+        v = v / self.samprate
+        dx = dx / self.samprate
+        i = 0
+        while i <= n:
+            x.append(v)
+            v += dx
+            i += 1
+        return x
+        
+    def refresh(self, offset):
+        self.x0 = offset
+        # Limit the operation so that we don't run off the ends of the
+        # data array:
+        if self.x0 < self.t0:
+            self.x0 = self.t0
+        elif self.x0 > self.t1-self.npts:
+            self.x0 = self.t1-self.npts
+            
+        if ns.cooked:
+            self.es.get_signal(self.chan, self.x0, self.x0 + self.npts, self.x)
+        if ns.raw:
+            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+        else:
+            self.y = np.zeros(self.npts)
+        self.ax1.clear()
+        if self.autoscale:
+            if ns.cooked:
+                ymin = self.x.min()
+                ymax = self.x.max()
+            else:
+                ymin = self.y.min()
+                ymax = self.y.max()
+            if ymin < self.ymin or ymax > self.ymax:
+                if ymin < self.ymin:
+                    self.ymin = ymin
+                if ymax > self.ymax:
+                    self.ymax = ymax
+        # self.ax1.set_xticks(self.xticks(4))
+        # self.ax1.set_xlim([self.x0, self.x0+self.npts])
+        self.time = self.set_time()
+        self.ax1.set_ylim(self.ymin, self.ymax)
+        if ns.cooked:
+            self.ax1.plot(self.time, self.x, color='blue')
+        if ns.raw:
+            self.ax1.plot(self.time, self.y*self.yscale, color='red')
+        plt.draw()
+        # if self.raw:
+        #    ndk.features.get_window(lfp_vec[self.chan], self.t0, self.winsize)
+
+    def find_index(self, x):
+        k = int(self.n * (x - self.tmin) / (self.tmax-self.tmin))
+        return max(0,min(k,self.n-1))
+
+
+    def mouse_move(self, event):
+        if not event.inaxes:
+            return
+
+        f = 1
+        # Might want to reconsider later, but in this case we only
+        # permit drag operations using the left mouse button:
+        if event.button == 1:
+            f = 1
+        elif event.button == 3:
+            f = 2
+        else:
+            return
+
+        x, y = self.press
+        if event.key == "shift":
+            if self.r1 is None:
+                self.r1 = self.ax1.axvspan(event.xdata, event.xdata+1, facecolor='g', alpha=0.5)
+            else:
+                set_right(self.r1, event.xdata)
+            plt.draw()
+        else:
+            # The mouse allows us to slide the right-hand side of the
+            # interval.  We should allow the user to change these later,
+            # but for now, this is the only mouse_move operation:
+            xpos = f * (x - event.xdata)
+            new_offset = self.x0 + xpos
+            self.refresh(new_offset)
+
+
+    # What happens when we press the mouse button: if left (1), start
+    # a state.  If right (3), delete the state:
+    def mouse_press(self, event):
+        # print( event.button )
+        if event.button == 1 or event.button == 3:
+            self.press = event.xdata, event.ydata
+            if event.button == 3 and event.key == "shift":
+                ndarray = self.r1.get_xy()
+                xarray = ndarray[:,0]
+                t0 = xarray.min()
+                t1 = xarray.max()
+                print("Start = sample {} @ {} sec".format(t0, t0/samprate))
+                print("End   = sample {} @ {} sec".format(t1, t1/samprate))
+                print("Window = {} samples ({} ms)".format(t1-t0, (t1-t0)*1000/samprate))
+
+
+    # Cap off the RHS (end time) of the state that is currently being
+    # defined:
+    def stop_drag(self, event):
+        # print( "stop_drag" )
+        #self.press = None
+        self.drag = False
+
+    # This only matters if we're using the left mouse button:
+    def mouse_release(self, event):
+        if event.button == 1:
+            self.stop_drag(event)
+
+    def key_press(self, event):
+        if event.key == 'q':
+            quit()
+        elif event.key == '+':
+            xlen = self.npts
+            if self.dec > 1:
+                self.dec = self.dec / 2
+            if self.dec < 1:
+                self.dec = 1
+                #elif xlen > 1024:
+                #    self.reshape_x(xlen / 2)
+        elif event.key == '-':
+            #xlen = self.npts
+            #if xlen < 1024:
+            #    self.reshape_x(xlen * 2)
+            #else:
+            self.dec = self.dec * 2
+        elif event.key == '>':
+            self.yscale = self.yscale * 1.1
+            self.refresh(self.x0)
+        elif event.key == '<':
+            self.yscale = self.yscale / 1.1
+            self.refresh(self.x0)
+        elif event.key == 'S':
+            y = self.y
+            l0, l1 = get_limits(self.r1)
+            with open('signal.dat', 'w') as f:
+                i = 0
+                for k in range(l0,l1):
+                    if i == 0:
+                        f.write('{}'.format(y[k]))
+                    else:
+                        f.write(',{}'.format(y[k]))
+                    i += 1
+                f.write('\n')
+        elif event.key == 'v':
+            self.autoscale = False
+            self.ymin = self.ymin / 1.1
+            self.ymax = self.ymax / 1.1
+            self.refresh(self.x0)
+        elif event.key == '^':
+            self.autoscale = False
+            self.ymin = self.ymin * 1.1
+            self.ymax = self.ymax * 1.1
+            self.refresh(self.x0)
+
+            
+    def next(self, event, incr=0):
+        if incr == 0:
+            incr = self.xdelta
+        print(incr)
+        self.refresh(self.x0 + incr)
+
+    def prev(self, event, incr=0):
+        if incr == 0:
+            incr = self.xdelta
+        print(incr)
+        self.refresh(self.x0 - incr)
+        
+    def save(self, event):
+        with open('/tmp/out.dat', 'w') as f:
+            for v in self.y:
+                f.write('{}\n'.format(float(v)))
+            
+
+
+
+# vcoefs plots waveforms and reconstructed waveforms, to visualize the
+# accuracy of spike representation.
+
+dbname = ns.files[0]
+
+#f = plt.gcf()
+#dpi = f.get_dpi()
+#print( "dpi = ", dpi )
+#default = f.get_size_inches()
+#print "default size = ", default
+#f.set_size_inches(default[0]*2, default[1])
+#size = f.get_size_inches()
+#print( "new size = ", size )
+
+#f=plt.subplots(figsize=size)
+#f=plt.subplots()
+
+
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, recfile = dbobj.get_metadata()
+# nspikes = dbobj.get_spike_count()
+
+t0, t1 = dbobj.get_dataset_interval()
+if ns.raw:
+    dsobj = ndk.ds.open(recfile)
+    if filtering:
+        dsobj.filter_data(lo, hi, 6)
+        b,a =  dsobj.dsf.butter_info
+        w,h = freqz(b, a, worN=2000)
+        with open('/tmp/fz.dat', 'w') as ff:
+            for i in range(len(w)):
+                ff.write('{} {}\n'.format( (samprate*0.5/np.pi)*w[i], abs(h[i]) ) )
+
+#
+# Create a plot window, 16in x 6in:
+#
+#print(plt.rcParams)
+#print(plt.rcParams.keys())
+plt.rcParams['axes.facecolor'] = 'black'
+f, ax = plt.subplots(figsize=[16.0, 6.0])
+ax = plt.gca()
+ax.clear()
+ax.set_xlabel("Sample")
+ax.set_ylabel("Spike magnitude")
+ax.grid(True)
+ax.set_xticks(ax.get_xticks()[::2])
+ax.set_yticks(ax.get_yticks()[::2])
+#line1, = ax.plot(plot.x, color='blue')
+if ns.raw:
+    plot = Cursor(dbobj, ns.channel, ax, ds=dsobj)
+else:
+    plot = Cursor(dbobj, ns.channel, ax)
+
+# X axis is time in seconds:
+
+plt.connect('motion_notify_event', plot.mouse_move)
+plt.connect('button_press_event', plot.mouse_press)
+plt.connect('button_release_event', plot.mouse_release)
+plt.connect('key_press_event', plot.key_press)
+
+# soff = Slider(ax, 'Offset', t0, t1, plot.t0)
+
+
+#plot_spikes(dbobj, ns.channel, t0+35000, t0+40000)
+plt.show()
+
+dbobj.close()

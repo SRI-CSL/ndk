@@ -1,0 +1,59 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import math
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import argparse
+from ndk.ui import iprint,wprint,eprint
+
+parser = argparse.ArgumentParser(description='Copy a basis in an sqlite3 database file.') 
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-from_id', type=int, default=0, help='Basis ID.')
+parser.add_argument('-to_id', type=int, default=0, help='Basis ID.')
+parser.add_argument('-force', dest='force', action='store_true', help='If to_id already exists, replace it.')
+ns = parser.parse_args()
+
+dbname = ns.files[0]
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+
+dbobj.execute('SELECT * from basis where basisID == {};'.format(ns.to_id))
+r = dbobj.fetchall()
+
+if len(r) > 0 and not ns.force:
+    eprint('Basis {} already has an entry.  Not replacing.'.format(ns.to_id))
+else:
+
+    dbobj.execute('SELECT * from basis where basisID == {};'.format(ns.from_id))
+    r = dbobj.fetchall()
+
+    if len(r) < 1:
+        eprint('Basis {} is not available.'.format(ns.from_id))
+    elif ns.from_id == ns.to_id:
+        wprint('Not bothering to copy from basis {} to basis {}.'.format(ns.from_id, ns.to_id))
+    else:
+        # offset real, sigma real, window real, nfuncs integer, ftype varchar(255)
+        offset = r[0][1]
+        sigma =  r[0][2]
+        window = r[0][3]
+        nfuncs = r[0][4]
+        ftype =  r[0][5]
+
+        dbobj.execute("insert into basis values ( {}, {}, {}, {}, {}, '{}' );".format(ns.to_id, offset, sigma, window, nfuncs, ftype))
+        dbobj.execute('SELECT * from basis where basisID == {};'.format(ns.to_id))
+        r = dbobj.fetchall()
+        iprint('Copied basis {} to {}: {}'.format(ns.from_id, ns.to_id, r))
+
+dbobj.close()

@@ -1,0 +1,78 @@
+#!/usr/bin/env python
+
+import sys
+import math
+import argparse
+import numpy as np
+import ndk.es.db3 as db
+# import matplotlib
+
+parser = argparse.ArgumentParser(description='Profile an event source, emitting mean amplitudes and ISIs.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-window', type=int, default=100000, help='Window to use (in samples) to average the desired quantities.')
+parser.add_argument('-channel', type=int, default=0, help='Channel to use to average amplitudes.')
+parser.add_argument('-event', default=None, help='If supplied, the event number to start at.')
+parser.add_argument('-step', type=int, default=1000, help='Step size to use for windowing.')
+ns = parser.parse_args()
+
+esname = ns.files[0]
+
+esobj = db.open_event_store(esname)
+
+start_time, end_time = esobj.get_dataset_interval()
+
+if ns.event is not None:
+    sys.stderr.write('Looking for event {}\n'.format(ns.event))
+    eventnum = ns.event
+    event_list = esobj.get_events()
+    for ts, enum in event_list:
+        if enum == eventnum:
+            sys.stderr.write('Found event at {}\n'.format(ts))
+            start_time = ts
+
+window = ns.window
+step = ns.step
+chan = ns.channel
+time = start_time
+rate = esobj.sample_rate
+pp = 0
+
+
+
+
+
+while time < end_time:
+    # Get spike IDs for the interval:
+    t0 = time
+    t1 = time + window
+    esobj.execute('select spikeID, samplenum from spiketimes where samplenum between {} and {} order by samplenum'.format(t0,t1))
+    r = esobj.fetchall()
+    mean_freq = 0.0
+    mean_amp  = 0.0
+    amp_sum = 0.0
+    isi_sum = 0.0
+    n = len(r)
+    if n > 1:
+        w = esobj.get_spike_waveform(r[0][0], chan)
+        mean_amp == (w.max() - w.min())
+        for k in range(1,n):
+            isi = (r[k][1] - r[k-1][1]) / rate
+            # freq = 1.0 / isi
+            # mean_freq += freq
+            isi_sum += isi
+            w = esobj.get_spike_waveform(r[k][0], chan)
+            mean_amp += (w.max() - w.min())
+        mean_freq =  float(n) / isi_sum
+        mean_amp = amp_sum / float(n)
+    # Mean is really at the window's midpoint:
+    ctime = (time+(window/2)) / rate
+    print('{} {} {}'.format(ctime, mean_amp, mean_freq))
+    sys.stdout.flush()
+    np = int( (100 * ((time + window/2) - start_time)) / (end_time - start_time) )
+    if np != pp:
+        sys.stderr.write('{}%\r'.format(np))
+        sys.stderr.flush()
+        pp = np
+    time += step
+
+esobj.close()

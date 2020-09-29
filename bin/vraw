@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.ds
+import ndk.ds.edf_in as edf
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+from matplotlib.widgets import Slider
+
+# Probably doesn't work on Windows:
+# matplotlib.use('GTKAgg')
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+
+global spike, nspikes, sl
+
+parser = argparse.ArgumentParser(description='Plot all waveforms for a given cluster and channel.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An EDF file (for now).')
+parser.add_argument('-channel', type=int, default=0, help='Use the given channel.  Default is 0 (first channel).')
+ns = parser.parse_args()
+
+#
+# Thrown together really fast and loose - the Cursor object needs to
+# be cleaned up and we need to have bona fide display-able State
+# objects:
+#
+class Cursor(object):
+    def __init__(self, ds, channel, ax1):
+        self.state_list = []
+        self.t0, self.t1 = ds.get_dataset_interval()
+        self.marking = False
+        self.npts = 16534
+        self.xprev = 0
+        self.x0 = self.t0
+        self.x1 = self.t0 + self.npts
+        self.press = None
+        self.ds = ds
+        self.chan = channel
+        self.dec = 1
+        self.x = self.ds.get_signal(self.chan, self.x0, self.x0 + self.npts)
+        # self.y = numpy.zeros(npts)
+        self.ymin = self.x.min()
+        self.ymax = self.x.max()
+
+        # Plotting the current values:
+        self.ax1 = ax1
+        ax1.plot(self.x)
+        ax1.set_xlabel("Time (samp)")
+        #ax1.set_xlim([self.x0, self.x1])
+        ax1.set_xlim([0, len(self.x)])
+
+
+    def reshape_x(self, new_npts):
+        print( new_npts )
+        self.npts = new_npts
+        self.x = self.ds.get_signal(self.chan, self.x0, self.x0 + self.npts)
+        self.refresh(self.x0)
+        
+    def refresh(self, offset):
+        self.x0 = offset
+        self.ds.get_signal(self.chan, self.x0, self.x0 + self.npts, self.x)
+        self.ax1.clear()
+        ymin = self.x.min()
+        ymax = self.x.max()
+        if ymin < self.ymin or ymax > self.ymax:
+            if ymin < self.ymin:
+                self.ymin = ymin
+            if ymax > self.ymax:
+                self.ymax = ymax
+        self.ax1.set_ylim(self.ymin, self.ymax)
+        self.ax1.plot(self.x, color='blue', alpha=0.5)
+        plt.draw()
+        # if self.raw:
+        #    ndk.features.get_window(lfp_vec[self.chan], self.t0, self.winsize)
+
+    def find_index(self, x):
+        k = int(self.n * (x - self.tmin) / (self.tmax-self.tmin))
+        return max(0,min(k,self.n-1))
+
+
+    def mouse_move(self, event):
+        if not event.inaxes:
+            return
+
+        # Might want to reconsider later, but in this case we only
+        # permit drag operations using the left mouse button:
+        if event.button != 1:
+            return
+
+        x, y = self.press
+        # The mouse allows us to slide the right-hand side of the
+        # interval.  We should allow the user to change these later,
+        # but for now, this is the only mouse_move operation:
+        xpos = x - event.xdata
+        new_offset = self.x0 + xpos
+        self.refresh(new_offset)
+        self.press = event.xdata, event.ydata
+        plt.draw()
+
+
+    # What happens when we press the mouse button: if left (1), start
+    # a state.  If right (3), delete the state:
+    def mouse_press(self, event):
+        print( event.button )
+        if event.button == 1:
+            self.press = event.xdata, event.ydata
+            print( "left" )
+        elif event.button == 3:
+            print( "right" )
+
+    # Cap off the RHS (end time) of the state that is currently being
+    # defined:
+    def stop_drag(self, event):
+        print( "stop_drag" )
+        #self.press = None
+
+
+    # This only matters if we're using the left mouse button:
+    def mouse_release(self, event):
+        if event.button == 1:
+            self.stop_drag(event)
+
+    def key_press(self, event):
+        if event.key == 'q':
+            quit()
+        elif event.key == '+':
+            xlen = self.npts
+            if xlen > 1024:
+                self.reshape_x(xlen / 2)
+        elif event.key == '-':
+            xlen = self.npts
+            self.reshape_x(xlen * 2)
+
+
+
+
+# vcoefs plots waveforms and reconstructed waveforms, to visualize the
+# accuracy of spike representation.
+
+dsname = ns.files[0]
+
+if dsname == None:
+    print( "You must supply a data store name." )
+    exit()
+
+ds = edf.edf_ds(dsname)
+
+if ds==None:
+    print( "Data store "+dsname+" does not exist!" )
+    quit()
+
+t0 = ds.start
+t1 = ds.end
+
+def plot_spikes(ds, channel, from_time, to_time):
+    winsize = to_time - from_time
+    y = ds.get_signal(channel, from_time, to_time)
+    plt.plot(y, color='blue', alpha=0.5)
+
+    plt.draw()
+    return 1
+
+
+#
+# Create a plot window, 16in x 6in:
+#
+f, ax = plt.subplots(figsize=[16.0, 6.0])
+ax = plt.gca()
+ax.clear()
+ax.set_xlabel("Sample")
+ax.set_ylabel("Spike magnitude")
+ax.grid(True)
+ax.set_xticks(ax.get_xticks()[::2])
+ax.set_yticks(ax.get_yticks()[::2])
+
+#line1, = ax.plot(plot.x, color='blue')
+plot = Cursor(ds, ns.channel, ax)
+# X axis is time in seconds:
+
+plt.connect('motion_notify_event', plot.mouse_move)
+plt.connect('button_press_event', plot.mouse_press)
+plt.connect('button_release_event', plot.mouse_release)
+plt.connect('key_press_event', plot.key_press)
+
+plt.show()
+
+dbobj.close()

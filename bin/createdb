@@ -1,0 +1,15 @@
+#!/bin/csh
+
+# Create an ndk db file from a recording in the most vanilla way
+# possible:
+
+rm $2
+mkdb $1 -db $2
+mkspikes2 $2
+mkcoefs $2
+mklabels $2
+cluster-gmm $2 -coefs 1:0,2:1,1:2
+
+# mkdb /opt/spikes/Feinstein/dist/CervicalVagusRecording7.smr -db tnfa.db
+# mkspikes2 tnfa.db -percent 98 -filter off 
+# mkcoefs tnfa.db

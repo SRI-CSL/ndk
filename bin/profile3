@@ -1,0 +1,394 @@
+#!/usr/bin/env python
+
+import sys
+import math
+import argparse
+import numpy as np
+from numpy import exp
+import ndk.es.db3 as db
+import ndk
+from math import sqrt
+# import matplotlib
+
+parser = argparse.ArgumentParser(description='Profile an event source, emitting mean amplitudes and ISIs.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-window', type=int, default=400000, help='Window to use (in samples) to average the desired quantities.')
+parser.add_argument('-bins', type=int, default=64, help='Number of bins to use when computing entropies.')
+parser.add_argument('-channel', type=int, default=0, help='Channel to use to average amplitudes.')
+parser.add_argument('-event', default=None, help='If supplied, the event number to start at.')
+parser.add_argument('-step', type=int, default=5000, help='Step size to use for windowing.')
+parser.add_argument('-basis', type=int, default=0, help='Basis ID to profile (default is 0).')
+parser.add_argument('-sigma', default=None, help='None, or sigma to use for gaussian smoothing of results.')
+parser.add_argument('-output', default=None, help='Filename for output data.')
+parser.add_argument('-cheap', dest='cheap', action='store_true', help="If provided, don't try to reconstruct the waveform, just use the first coefficient.")
+parser.add_argument('-cluster', type=int, default=None, help='If given, profile only the specified cluster.')
+ns = parser.parse_args()
+
+print('# Command: {}'.format(sys.argv))
+
+esname = ns.files[0]
+
+esobj = db.open_event_store(esname)
+
+start_time, end_time = esobj.get_dataset_interval()
+#
+# hack to fix interval - need to make this consistent everywhere!
+samprate, nchannels, uristring = esobj.get_metadata()
+if ns.cheap:
+    t0, t1 = esobj.get_dataset_interval()
+    print("Cheap mode - interval is [{}, {}]".format(t0, t1))
+else:
+    dsobj = ndk.ds.open(uristring, esname)
+    t0 = dsobj.t0
+    t1 = dsobj.t1
+
+if t0 != start_time:
+    start_time = t0
+if t1 != end_time:
+    end_time = t1
+
+if nchannels < ns.channel:
+	print("Channel {} isn't available in this recording (only {} available).".format(ns.channel, nchannels))
+	quit()
+
+sys.stderr.write('# Event store time interval is [{}, {}]\n'.format(start_time, end_time))
+if ns.event is not None:
+    sys.stderr.write('# Looking for event {}\n'.format(ns.event))
+    eventnum = ns.event
+    event_list = esobj.get_events()
+    for ts, enum in event_list:
+        if enum == eventnum:
+            sys.stderr.write('# Found event at {}\n'.format(ts))
+            start_time = ts
+
+basisnum  = 0
+window = ns.window
+step = ns.step
+chan = ns.channel
+rate = esobj.sample_rate
+pp = 0
+sigma = ns.sigma
+
+var = None
+if ns.sigma is not None:
+    s = float(sigma)
+    var = s*s
+
+def weight(x, v):
+    if v is None:
+        return 1.0
+    else:
+        return exp( -(x * x) / v)
+    
+
+nspikes = esobj.get_spike_count(chan)
+print('# Number of spikes on channel {}: {}'.format(chan, nspikes))
+seq = esobj.get_basis(basisnum)
+nfuncs = len(seq)
+
+# Setup to hold times, IDs, ISIs, and amplitudes for each spike in
+# sequence:
+times = np.zeros(nspikes, dtype=np.uint32)
+ids = np.zeros(nspikes, dtype=np.uint32)
+isis = np.zeros(nspikes, dtype=np.uint32)
+amps = np.zeros(nspikes)
+c0s = np.zeros(nspikes)
+c1s = np.zeros(nspikes)
+
+#esobj.execute('select spiketimes.spikeID, samplenum from spiketimes join spikebasis\
+#               where spikebasis.basisID = {} order by samplenum'.format(basisnum))
+#r = esobj.fetchall()
+
+
+# Retrieve spike IDs, times, coef index, and coefs.
+
+#esobj.execute('select spiketimes.spikeID,spiketimes.samplenum,cindex,coef from spikecoefs \
+#               left join spiketimes on spikecoefs.spikeID = spiketimes.spikeID \
+#               left join spikebasis on spikecoefs.spikeID = spikebasis.spikeID \
+#               left join spikechannels on spikecoefs.spikeID = spikechannels.spikeID \
+#               and spikebasis.basisID = {} \
+#               and spikechannels.channel = {} \
+#               and spikecoefs.channel = {} \
+#               order by spiketimes.samplenum'.format(basisnum, chan, chan))
+
+if ns.cluster is None:
+    esobj.execute('select spiketimes.spikeID,spiketimes.samplenum,cindex,coef from spikecoefs \
+    join spiketimes join spikebasis join spikechannels \
+    where spikecoefs.spikeID = spikechannels.spikeID \
+    and spikecoefs.spikeID = spikebasis.spikeID and spikecoefs.spikeID = spiketimes.spikeID \
+    and spikebasis.basisID = {}  and spikechannels.channel = {} \
+    and spikecoefs.channel = {} \
+    order by spiketimes.samplenum'.format(basisnum, chan, chan))
+else:
+    esobj.execute('select spiketimes.spikeID,spiketimes.samplenum,cindex,coef from spikecoefs \
+    join spiketimes join spikebasis join spikechannels join spikelabels \
+    where spikecoefs.spikeID = spikechannels.spikeID \
+    and spikecoefs.spikeID = spikelabels.spikeID and spikelabels.label == {} \
+    and spikecoefs.spikeID = spikebasis.spikeID and spikecoefs.spikeID = spiketimes.spikeID \
+    and spikebasis.basisID = {}  and spikechannels.channel = {} \
+    and spikecoefs.channel = {} \
+    order by spiketimes.samplenum'.format(ns.cluster, basisnum, chan, chan))
+
+cinfo = esobj.fetchall()
+
+sys.stderr.write('# Mondo join returned {} results.\n'.format(len(cinfo)))
+
+# Now construct dictionaries to support computation of amplitudes.
+# sdict will hold spike sample numbers (times), and cdict will hold a
+# coefficient array for each spike.  Both dictionaries are keyed on
+# spike ID.  Also fill the ID array as we go.
+
+k = 0
+sdict = {}
+cdict = {}
+for i in range(len(cinfo)):
+    spikeid = cinfo[i][0]
+
+    if ids[k] == -1:
+        ids[k] = spikeid
+    else:
+        if spikeid != ids[k]:
+            k += 1
+            ids[k] = spikeid
+            
+    try:
+        y = sdict[spikeid]
+    except KeyError:
+        sdict[spikeid] = cinfo[i][1]
+    try:
+        x = cdict[spikeid]
+    except KeyError:
+        cdict[spikeid] = np.zeros(nfuncs)
+        x = cdict[spikeid]
+
+    idx = cinfo[i][2]
+    x[idx] = cinfo[i][3]
+
+nspikes = k+1
+
+sys.stderr.write('# Number of unique spikes: {}\n'.format(nspikes))
+
+# The profiling process needs to be conditional on basis, since that's
+# the primary means of categorizing spikes (e.g., into A, B, or C
+# fiber spiking).  For now, we'll assume basis ID 0, but we'll
+# eventually have to specify.
+
+# NOTE: The coefficient space is a feature space that might be useful.
+# As we improve spike sorting, we should (I hope) be able to improve
+# reconstruction and hence the utility of coefficient space as a good
+# feature space for characterizing signals.
+
+ppercent = 0
+# Building the dictionary helped speed this up - no point in printing progress:
+for i in range(nspikes):
+    # The spike ID (dict key) was stored in ids:
+    id = ids[i]
+
+    try:
+        # Time of spike:
+        times[i] = sdict[id]
+
+        # inter-spike interval:
+        if i > 0:
+            isis[i] = times[i] - times[i-1]
+
+        # Basis coefficients for waveform:
+        a = cdict[id]
+        if ns.cheap:
+            amps[i] = a[0]
+        else:
+            w = ndk.features.gen_waveform(a, seq)
+            amps[i] = w.max() - w.min()
+        c0s[i] = a[0]
+        c1s[i] = a[1]
+    except:
+        pass
+
+sys.stderr.write('# All data collected.\n')
+
+# Given a hint (starting index) i, a time interval expressed as a pair
+# [from_time, to_time] and a timestamp array, return a range of
+# indices that are within the specified time interval, or -1 if no
+# such interval is found.
+
+def index_range(i, interval, array):
+    from_time, to_time = interval
+    n = len(array)
+    if i >= n:
+        sys.stderr.write('# Hint {} is larger than the array length {}!\n'.format(i, n))
+        return -1, 0
+
+    # The hint is "somewhere near" the correct interval, so we will
+    # need to search.  Search for the first index i0 by marching back:
+    i0 = i
+    while i0 >= 0 and array[i0] >= from_time:
+        i0 = i0 - 1
+
+    if i0 < 0:
+        i0 = 0
+    while i0 < n and array[i0] < from_time:
+        i0 += 1
+
+    # Now i0 should be the first spike INSIDE the interval, or it is
+    # the invalid value 'n' (past the end of the array):
+    if i0 == n:
+        # sys.stderr.write('While searching, we ran into the end of the array!\n')
+        return -1, 1
+
+    # Likewise with i1 - start at i0 and then march forward until the
+    # end of the array or until i1 hits the end of the interval.
+    i1 = i0
+    while i1 < n and array[i1] <= to_time:
+        i1 += 1
+
+    # We are ok if i1 hits the end of the array:
+    i1 = i1 - 1
+
+    return i0, i1
+
+class DerivBuf:
+    def __init__(self):
+        self.tbuf = np.zeros(3)
+        self.abuf = np.zeros(3)
+        self.fbuf = np.zeros(3)
+        self.k = 0
+
+    def new_point(self, time, amp, freq):
+        self.tbuf[0] = self.tbuf[1]
+        self.tbuf[1] = self.tbuf[2]
+        self.tbuf[2] = time
+        self.abuf[0] = self.abuf[1]
+        self.abuf[1] = self.abuf[2]
+        self.abuf[2] = amp
+        self.fbuf[0] = self.fbuf[1]
+        self.fbuf[1] = self.fbuf[2]
+        self.fbuf[2] = freq
+        self.k += 1
+
+    def deriv(self):
+        if self.k < 3:
+            return 0,0,0
+        else:
+            dt = 0.5 * (self.tbuf[2]-self.tbuf[0])
+            if dt < 1e-08:
+                return 1e8,1e8,dt
+            da = (self.abuf[2] - self.abuf[0]) / dt
+            df = (self.fbuf[2] - self.fbuf[0]) / dt
+            return da, df, dt
+        
+
+class Entropy:
+    def __init__(self, nbins, min, max):
+        self.nbins = nbins
+        self.min = min
+        self.max = max
+        self.hist = np.zeros(nbins, dtype=np.uint32)
+        self.scale = float(nbins) / (max-min)
+        self.nsamp = 0
+
+    def add_value(self, item):
+        k = int(self.scale * (item - self.min))
+        if k in range(self.nbins):
+            self.hist[k] += 1
+            self.nsamp += 1
+
+    def reset(self):
+        self.hist[:] = 0
+
+    def entropy(self):
+        x = 0.0
+        y = self.hist.sum()
+        if y > 0:
+            for v in self.hist:
+                if y > 0:
+                    x0 = float(v)/float(y)
+                    if x0 > 0:
+                        x += x0 * math.log(x0)
+        return -x
+
+
+print('# Number of data points; {}; end_time={}'.format(nspikes, end_time))
+i = 0
+prev_i = 0
+hwin = window / 2
+ppercent = 0
+dur = end_time - start_time
+time = start_time
+# Not used?
+# dbuf = DerivBuf()
+
+isi_entropy = Entropy(ns.bins, isis.min(), isis.max())
+print('amps min/max = {} {}'.format(amps.min(), amps.max()))
+amp_entropy = Entropy(ns.bins, amps.min(), amps.max())
+
+with open(ns.output, 'w') as f:
+    while time <= (end_time + hwin):
+        # Get spike IDs for the interval:
+        t0 = time - hwin
+        t1 = time + hwin
+
+        mean_freq = 0.0
+        mean_amp = 0.0
+        amp_sum = 0.0
+        mean_c0 = 0.0
+        c0_sum = 0.0
+        mean_c1 = 0.0
+        c1_sum = 0.0
+        isi_sum = 0.0
+
+        isi_entropy.reset()
+        amp_entropy.reset()
+
+        i,j = index_range(i, (t0, t1), times)
+        if i != -1:
+            # Compute means
+            for k in range(i,j):
+                x = times[k] - time
+                isi = isis[k] / rate
+                w = weight(x, var)
+                isi_sum += isi * w
+                amp_sum += amps[k] * w
+                isi_entropy.add_value(isis[k])
+                amp_entropy.add_value(amps[k])
+            n = j-i
+            #        if i >= j:
+            #            sys.stderr.write('{}\n'.format(n))
+            #            sys.stderr.flush()
+            if n > 0:
+                mean_isi = isi_sum / float(n)
+                if isi_sum > 0.0:
+                    # Mean freq. is inverse of mean ISI:
+                    mean_freq = float(n) / isi_sum
+                mean_amp = amp_sum / float(n)
+
+            da = 0.0
+            df = 0.0
+            for k in range(i,j):
+                a = amps[k] - mean_amp
+                da += a*a
+                isi = isis[k] / rate
+                # Note carefully that profile3 emits variance in terms of
+                # interval, NOT frequency, for compatibility with NDE:
+                b = isi - mean_isi
+                df += b*b
+            if n > 0:
+                da = sqrt(da) / n
+                df = sqrt(df) / n
+            
+            #ctime = time / rate
+        ctime = time / rate
+
+
+        f.write('{} {} {} {} {} {} {}\n'.format(ctime, mean_amp, da, mean_freq, df, amp_entropy.entropy(), isi_entropy.entropy()))
+
+        np = int( (100 * (time - start_time)) / dur )
+        if np != pp:
+            sys.stderr.write('Writing: {}%\r'.format(np))
+            ppercent = np
+        time += step
+    
+esobj.close()
+
+    
+    
+

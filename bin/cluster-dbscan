@@ -1,0 +1,62 @@
+#!/usr/bin/env python
+
+import sys
+import argparse
+import numpy
+import ndk.es.db3 as db
+import ndk.features
+from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
+
+def pca_reduce(parray, ncomp=3):
+    p = PCA(n_components=ncomp)
+    pf = p.fit(parray)
+    return pf.transform(parray)
+
+#
+# Relabel a spike file directly using Dbscan:
+#
+
+def dbscan_cluster(x):
+    p = DBSCAN(eps=10, min_samples=2)
+    labels = p.fit_predict(x)
+    return labels
+
+
+def dbscan_relabel(db, coefs, ncomp=2):
+    vals = db.get_coef_array(coefs)
+    pwr = vals.T
+
+    if (ncomp > 0):
+        x = pca_reduce(pwr, ncomp)
+    else:
+        x = pwr
+
+    l = dbscan_cluster(x)
+    print( l )
+    db.clear_spike_labels()
+    for i in range(0,len(l)):
+        db.set_spike_label(i, l[i])
+
+
+parser = argparse.ArgumentParser(description='Performs good old K-means clustering on the dataset.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-coefs', default='2:0,2:1,2:2,2:3', help='Coefficients to use for clustering.')
+parser.add_argument('-ncomp', type=int, default=0, help='Number of PCA components to use for dimensionality reduction.')
+ns = parser.parse_args()
+
+filename = ns.files[0]
+
+ncomp = ns.ncomp
+coefs = ndk.features.parse_coef_spec(ns.coefs)
+dbobj = db.open_event_store(filename)
+
+if dbobj != None:
+    dbscan_relabel(dbobj, coefs, ncomp)
+    h = dbobj.label_histogram()
+1    print( 'Label counts:' )
+    for i in range(len(h)):
+        print( 'label {}: {}'.format(i, h[i]) )
+    dbobj.close()
+
+

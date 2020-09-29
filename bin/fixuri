@@ -1,0 +1,20 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.es.db3 as db3
+from uritools import urisplit
+
+if len(sys.argv) > 0:
+    dbname = sys.argv[1]
+    esobj = db3.open_event_store(dbname)
+    samprate, nchannels, recfile = esobj.get_metadata()
+    desc = urisplit(recfile)
+    s = desc.scheme
+    if s == None or s == 'smr':
+        last = desc.path.split('/')[-1]
+        newpath = 'cass://localhost/'+last
+        print('New URI: {}'.format(newpath))
+        esobj.execute('delete from meta')
+        esobj.execute("insert into meta values ({}, {}, '{}')".format(samprate, nchannels, newpath))
+    esobj.close()
+

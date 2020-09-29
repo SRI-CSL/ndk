@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+from ndk.ui import iprint,wprint,eprint
+import ndk.cluster as clust
+from sklearn.decomposition import PCA
+
+# Probably doesn't work on Windows:
+# matplotlib.use('GTKAgg')
+# matplotlib.use('Qt4Agg')
+iprint("{}".format(matplotlib.rcsetup.interactive_bk))
+matplotlib.use('TkAgg')
+iprint("{}".format(matplotlib.get_backend()))
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+def pca_reduce(parray, ncomp=3):
+    p = PCA(n_components=ncomp)
+    pf = p.fit(parray)
+    return pf.transform(parray)
+
+
+parser = argparse.ArgumentParser(description='Visualize superimposed raw waveforms.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-start', type=int, default=0, help='Starting timestamp.')
+parser.add_argument('-end', type=int, default=0, help='Starting timestamp.')
+parser.add_argument('-clusters', default=None, help='Plots waveforms only for the specified comma-separated clusters.')
+parser.add_argument('-fix', dest='fix', action='store_true', help='If provided, keeps axis limits fixed.')
+parser.add_argument('-normalize', dest='normalize', action='store_true', help='If provided, normalizes all waveforms.')
+parser.add_argument('-nocolors', dest='nocolors', action='store_true', help="Don't plot colors, just use red.")
+parser.add_argument('-zeromean', dest='zeromean', action='store_true', help='If provided, locally remove the raw signal mean before display.')
+parser.add_argument('-replace', dest='replace', action='store_true', help='If provided, replace coefficients with waveform PCA components.')
+parser.add_argument('-nographics', dest='nographics', action='store_true', help='If provided, do not plot waveforms.')
+parser.add_argument('-fromchannel', type=int, default=2, help='Show spikes that were derived from this channel (default=channel 2)')
+parser.add_argument('-channel', type=int, default=2, help='Show signals from this channel.')
+parser.add_argument('-basisid', type=int, default=None, help='Restrict plotting to spikes that use the supplied basis ID.')
+parser.add_argument('-filter',  default="300:2000")
+parser.add_argument('-alpha', type=float, default=0.1, help='Value of the alpha blend for plot transparency.')
+parser.add_argument('-window', type=int, default=64, help='Consider windows around spikes with this width in samples.')
+parser.add_argument('-offset', type=int, default=0, help='Consider windows offset from the spike by this number of samples.')
+ns = parser.parse_args()
+
+replace = ns.replace
+time_offset = ns.offset
+
+colortab = ( (1.0, 0.0, 0.0),
+             (0.0, 1.0, 0.0),
+             (1.0, 1.0, 0.0),
+             (0.0, 0.0, 1.0),
+             (1.0, 0.0, 1.0),
+             (0.0, 1.0, 1.0),
+             (1.0, 1.0, 1.0)
+)
+
+clusters = None
+if ns.clusters is not None:
+    clusters = [int(s) for s in ns.clusters.split(',')]
+
+
+def parse_filter_args(arg):
+    [lowstr, highstr] = arg.split(':')
+    if len(lowstr) == 0:
+        lo = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+
+    return lo,hi
+
+
+if ns.filter.find(':') == -1:
+    filtering = False
+    iprint( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filtering = True
+    lo,hi = parse_filter_args(ns.filter)
+    iprint( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+dbname = ns.files[0]
+coef_limit = 0.004000
+spike_limit = 0.001000
+#plt.tight_layout()
+#f = plt.gcf()
+#dpi = f.get_dpi()
+#iprint( "dpi = {}".format( dpi ))
+#default = f.get_size_inches()
+#iprint( "default size = {}".format( default ))
+#f.set_size_inches(default[0]*2, default[1]*2)
+#size = f.get_size_inches()
+#iprint( "new size = {}".format( size ) )
+# f=plt.subplots(figsize=size)
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+esobj = db.open_event_store(dbname)
+if esobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, recfile = esobj.get_metadata()
+nspikes = esobj.get_spike_count()
+
+#
+# Need to ensure that channel is picked up by ALL queries...
+#
+if ns.basisid is None:
+    esobj.execute('select spiketimes.spikeID,spiketimes.samplenum,spikelabels.label from spiketimes join spikechannels join spikelabels where spiketimes.spikeID=spikechannels.spikeID and spiketimes.spikeID=spikelabels.spikeID and spikechannels.channel={}'.format(ns.fromchannel))
+    r = esobj.fetchall()
+    spike_indices = [x[0] for x in r]
+    spike_timestamps = [x[1] for x in r]
+    spike_labels = [x[2] for x in r]
+else:
+    esobj.execute('select spiketimes.spikeID,spiketimes.samplenum,spikelabels.label from spiketimes join spikebasis join spikelabels where spiketimes.spikeID = spikebasis.spikeID and spikebasis.basisID = {} and spiketimes.spikeID=spikelabels.spikeID'.format(ns.basisid))
+    r = esobj.fetchall()
+    iprint('{} spikes belong to basisID {}.'.format(len(r), ns.basisid))
+    spike_indices = [x[0] for x in r]
+    spike_timestamps = [x[1] for x in r]
+    spike_labels = [x[2] for x in r]
+
+
+# lfp_vec, samprate, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+# dsobj = ndk.ds.spike2(recfile)
+dataset = recfile.split('/')
+iprint(recfile)
+iprint(dataset[-1])
+dsobj = ndk.ds.open(recfile, dbname)
+if filtering:
+    dsobj.filter_data(lo, hi, 6)
+
+
+if ns.start:
+    from_time = ns.start
+else:
+    from_time = spike_timestamps[0]
+if ns.end:
+    to_time = ns.end
+else:
+    to_time = spike_timestamps[-1]
+
+# Not sure why, but we CANNOT operate on the full filtered signal...    
+# signal = dsobj.get_chunk(ns.channel, from_time, to_time)
+
+
+#
+# This version goes straight to the raw data:
+#
+
+
+def plot_em_0(a, es, spike_indices, spike_times, ws=64):
+    a.clear()
+    wh = ws / 2
+
+#    wlist = {}
+    wlist = []
+
+    if ns.fix:
+        a.set_ylim([-spike_limit,spike_limit])
+    # Grab the raw window, where ts is aligned with the center:
+    percent = 0
+    old_percent = 0
+    j = 0
+    nwaves = 0
+    nwin = len(spike_times)
+    # Accumulate wlist, the list of extracted waveforms:
+    l = 0
+    for ts in spike_times:
+        percent = (100 * j) / nwin
+        if percent > old_percent:
+            old_percent = percent
+            print('Grabbing...{:>3}%\r'.format(int(percent)), end="")
+        if ts >= from_time and ts <= to_time:
+            t0 = int( (ts - wh) + time_offset )
+            #t1 = int(t0 + ws - 1)
+            t1 = int( (t0 + ws + 10) + time_offset )
+            # x = signal[t0:t1]
+            x = dsobj.get_chunk(ns.channel, t0, t1)
+            x = x[0:-11]
+            l = len(x)
+            if ns.zeromean:
+                y = x - x.mean()
+            else:
+                y = x
+
+            if ns.normalize:
+                mag = np.dot(y,y)
+                if mag > 0:
+                    y /= math.sqrt(mag)
+            wlist.append(y)
+            nwaves += 1
+        j += 1
+
+    print("Found {} waveforms (out of {} total).".format(nwaves, nwin))
+
+    # Plot a random subset of these:
+    percent = 0
+    old_percent = 0
+    samps = [(x-wh)+time_offset for x in range(0,l)]
+    np.random.seed(12345)
+    randperm = np.random.permutation(nwaves)
+    nsamps = 5000
+    clist = []
+    color_list = []
+    for j in range(nsamps):
+        percent = (100 * j) / nsamps
+        if percent > old_percent:
+            old_percent = percent
+            print('Plotting...{:>3}%\r'.format(int(percent)), end="")
+        y = wlist[randperm[j]]
+        a.set_facecolor('black')
+        
+        l = spike_labels[randperm[j]]
+        if clusters is None:
+            if ns.nocolors:
+                color = colortab[0]
+            else:
+                k = l % len(colortab)
+                color = colortab[k]
+            #for spine in a.spines.values():
+            #    spine.set_edgecolor(color)
+            plt.plot(samps, y, color=color, alpha=ns.alpha)
+        else:
+            if l in clusters:
+                k = l % len(colortab)
+                color = colortab[k]
+                color_list.append(color)
+                clist.append(y)
+            else:
+                color = colortab[0]
+                #for spine in a.spines.values():
+                #    spine.set_edgecolor(color)
+                plt.plot(samps, y, color=color, alpha=0.01)  # highlight it
+
+    if clusters is not None:
+        i = 0
+        for y in clist:
+            plt.plot(samps, y, color=color_list[i], alpha=ns.alpha)
+            i += 1
+        
+
+    a.set_xlabel("Sample")
+    a.set_ylabel("Mag.")
+    a.grid(True)
+    a.set_xticks(a.get_xticks()[::2])
+    a.set_yticks(a.get_yticks()[::2])
+    plt.draw()
+    newlist = wlist
+    #clust.pca_reduce_waveforms(newlist)
+    points = pca_reduce(newlist, 5)
+    if replace:
+        k = 0
+        es.execute('delete from spikecoefs where channel={}'.format(ns.channel))
+        print("Replacing coefficients for channel {}.".format(ns.channel))
+        for sid in spike_indices:
+            coefs = points[k,:]
+            es.set_spike_coefs(sid, ns.channel, coefs)
+            k += 1
+    return j
+
+
+def old_plotting_function(a, es, spike_times, ws=64):
+    if ns.start:
+        from_time = ns.start
+    else:
+        from_time = spike_times[0]
+    if ns.end:
+        to_time = ns.end
+    else:
+        to_time = spike_times[-1]
+    a.clear()
+    wh = ws / 2
+
+#    wlist = {}
+    wlist = [[] for k in range(len(spike_ids))]
+
+    if ns.fix:
+        a.set_ylim([-spike_limit,spike_limit])
+    # Grab the raw window, where ts is aligned with the center:
+    percent = 0
+    old_percent = 0
+    j = 0
+    k = 0
+    nwin = len(spike_ids)
+    samps = [x-wh for x in range(ws-1)]
+    for sid in spike_ids:
+        percent = (100 * j) / nwin
+        if percent > old_percent:
+            old_percent = percent
+            print('Grabbing...{:>3}%\r'.format(int(percent)), end="")
+        ts = spike_times[j]
+        if ts >= from_time and ts <= to_time:
+            t0 = (ts - wh) + time_offset
+            t1 = (t0 + ws - 1) + time_offset
+            x = dsobj.get_chunk(abs(ns.channel), t0, t1)
+            if ns.zeromean:
+                x = x - x.mean()
+
+            wlist[k] = x
+            k += 1
+
+            a.set_facecolor('grey')
+        
+            if ns.cluster is not None:
+                j = cluster % len(colortab)
+                color = colortab[j]
+                for spine in a.spines.values():
+                    spine.set_edgecolor(color)
+            plt.plot(samps, x, color='red', alpha=ns.alpha)
+        j += 1
+
+    a.set_xlabel("Sample")
+    a.set_ylabel("Mag.")
+    a.grid(True)
+    a.set_xticks(a.get_xticks()[::2])
+    a.set_yticks(a.get_yticks()[::2])
+    plt.draw()
+    newlist = [wlist[j] for j in range(k)]
+    #points = clust.pca_reduce_waveforms(newlist)
+    points = pca_reduce(newlist, n_pca_comps)
+    if replace:
+        k = 0
+        for sid in spike_ids:
+            coefs = points[k,:]
+            es.set_spike_coefs(sid, k, coefs)
+    return j
+
+
+
+if False and ns.cluster is not None:
+    esobj.execute('select spikeID,samplenum from spikelabels join spiketimes where spikelabels.spikeID=spiketimes.spikeID and where spikelabels.label = {};'.format(ns.cluster))
+    result = esobj.fetchall()
+    spike_indices=[x[0] for x in result]
+    spike_timestamps = [x[1] for x in result]
+
+ax = plt.gca()
+#plt.connect('key_press_event', press)
+count = plot_em_0(ax, esobj, spike_indices, spike_timestamps, ws=ns.window)
+if not ns.nographics:
+    plt.show()
+    iprint('plt.show() returned.')
+
+esobj.close()
+iprint('{} waveforms'.format(count))

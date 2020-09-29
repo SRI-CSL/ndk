@@ -1,0 +1,104 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+from uritools import urisplit
+from ndk.ui import iprint,wprint,eprint
+import ndk.ui as ui
+
+parser = argparse.ArgumentParser(description='Remove selected spikes.  Removal is conditioned on the CONJUNCTION of the specified criteria, i.e., ALL conditions need to be satisfied.  Disjunction is achieved by running rmspikes more than once.') 
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An NDK event store.')
+parser.add_argument('-basisid', type=int, default=None, help='Remove spikes that are associated with this basis.')
+parser.add_argument('-label', type=int, default=None, help='Remove spikes that have this label.')
+ns = parser.parse_args()
+
+# Remove all spike IDs that satisfy certain criteria - meant to "undo"
+# spike sorting actions.  Relevant tables are:
+#
+# spiketimes
+# spikebasis
+# spikecoefs
+# spikelabels
+
+#
+# Can remove on any or all of these conditions:
+#
+# basisid
+# label
+#
+# Reminder: We can't use channel, since the coefs table will always
+# contain coefficients for EACH channel, regardless of the
+# "originating" channel.  Originating channel information is encoded
+# in the basis ID number using the formula id = (m+1)*1000 + n, where
+# n is the originating basis ID and m is the originating channel
+# number.
+
+dbname = ns.files[0]
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+joins = ['spiketimes']
+conds = []
+
+if ns.basisid:
+    joins.append('spikebasis')
+    conds.append('spikebasis.basisID={} and spikebasis.spikeID=spiketimes.spikeID'.format(ns.basisid))
+
+if ns.label:
+    joins.append('spikelabels')
+    if len(conds) > 0: conds.append('and')
+    conds.append('spikelabels.label={} and spikelabels.spikeID=spiketimes.spikeID'.format(ns.label))
+
+#if ns.channel:
+#    joins.append('spikecoefs')
+#    if len(conds) > 0: conds.append('and')
+#    conds.append('spikecoefs.channel={} and spikecoefs.spikeID=spiketimes.spikeID'.format(ns.channel))
+
+dbobj.execute('select count(*) from spikebasis;')
+sbr = dbobj.fetchall()
+wprint('sanity check before: number of spikes in spikebasis: {}'.format(sbr[0][0]))
+
+jstring = ' join '.join(joins)
+query = ' '.join(['select spiketimes.spikeID from ' + jstring + ' where'] + conds)
+#tstring = ','.join(joins)
+#query = ' '.join(['delete from ' + tstring + ' where'] + conds)
+
+print(query)
+
+dbobj.execute(query)
+r = dbobj.fetchall()
+iprint('Number of hits: {}'.format(len(r)))
+
+# Painful - I'm sure there's a better way to do this, but get it
+# working first:
+
+# We have redefined the schema so that spikecoefs, spikelabels, and
+# spikebasis are all child tables with foreign keys that reference the
+# spikeID provided in spiketimes.  They are also specifically cascaded
+# ON DELETE, so that deleting from spiketimes forces the same spikeIDs
+# to be deleted from the other tables.
+
+dbobj.execute('delete from spiketimes where spikeID in ( {} );'.format(query))
+
+dbobj.execute('select count(*) from spikebasis;')
+sbr = dbobj.fetchall()
+wprint('sanity check after:  number of spikes in spikebasis: {}'.format(sbr[0][0]))
+
+dbobj.close()
+
+
+
+    

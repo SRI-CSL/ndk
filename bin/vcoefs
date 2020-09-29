@@ -1,0 +1,323 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import numpy as np
+import matplotlib
+from ndk.ui import iprint,wprint,eprint
+
+# Probably doesn't work on Windows:
+# matplotlib.use('GTKAgg')
+# matplotlib.use('Qt4Agg')
+iprint("{}".format(matplotlib.rcsetup.interactive_bk))
+matplotlib.use('TkAgg')
+iprint("{}".format(matplotlib.get_backend()))
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+
+global spike, nspikes, sl
+
+parser = argparse.ArgumentParser(description='Visualize waveforms and coefficients, optionally compare to raw data.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-spike', type=int, default=0, help='Starting spike ID to use for plotting.')
+parser.add_argument('-cluster', type=int, default=None, help='Plots waveforms for only this cluster.')
+parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, attempts to overlay raw data.')
+parser.add_argument('-diff', dest='diff', action='store_true', help='If provided, plots difference between raw and estimated data.')
+parser.add_argument('-fix', dest='fix', action='store_true', help='If provided, keeps axis limits fixed.')
+parser.add_argument('-pp', dest='pp', action='store_true', help='If provided, causes phase plane plots to be added.')
+parser.add_argument('-zeromean', dest='zeromean', action='store_true', help='If provided, locally remove the raw signal mean before display.')
+parser.add_argument('-channel', type=int, default=-1, help='Channel(s) to show')
+parser.add_argument('-basisid', type=int, default=None, help='Restrict plotting to spikes that use the supplied basis ID.')
+parser.add_argument('-filter',  default="100:3000")
+ns = parser.parse_args()
+
+
+def parse_filter_args(arg):
+    [lowstr, highstr] = arg.split(':')
+    if len(lowstr) == 0:
+        lo = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+
+    return lo,hi
+
+
+if ns.filter.find(':') == -1:
+    filtering = False
+    iprint( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filtering = True
+    lo,hi = parse_filter_args(ns.filter)
+    iprint( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+spike = 0
+sl = None
+# vcoefs plots waveforms and reconstructed waveforms, to visualize the
+# accuracy of spike representation.
+
+dbname = ns.files[0]
+spike = ns.spike
+coef_limit = 0.004000
+spike_limit = 0.001000
+
+#plt.tight_layout()
+f = plt.gcf()
+dpi = f.get_dpi()
+iprint( "dpi = {}".format( dpi ))
+default = f.get_size_inches()
+iprint( "default size = {}".format( default ))
+f.set_size_inches(default[0]*2, default[1]*2)
+size = f.get_size_inches()
+iprint( "new size = {}".format( size ) )
+f=plt.subplots(figsize=size)
+
+
+def next_spike_id(k=1):
+    global spike, spike_indices
+    spike = spike + k
+    iprint("{}".format( spike ))
+    return spike_indices[spike]
+
+def prev_spike_id(k=1):
+    global spike, spike_indices
+    spike = spike - 1
+    iprint("{}".format( spike ))
+    return spike_indices[spike]
+
+if dbname == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+esobj = db.open_event_store(dbname)
+if esobj==None:
+    eprint( "Data store "+dbname+" does not exist!" )
+    quit()
+
+samprate, nchannels, recfile = esobj.get_metadata()
+nspikes = esobj.get_spike_count()
+if ns.basisid is None:
+    spike_indices = range(0,nspikes)
+else:
+    esobj.execute('select spiketimes.spikeID from spiketimes join spikebasis where spiketimes.spikeID = spikebasis.spikeID and spikebasis.basisID = {}'.format(ns.basisid))
+    r = esobj.fetchall()
+    iprint('{} spikes belong to basisID {}.'.format(len(r), ns.basisid))
+    spike_indices = [x[0] for x in r]
+
+if ns.channel == -1:
+    nc = nchannels
+else:
+    nc = 1
+
+if ns.raw or ns.diff:
+    # lfp_vec, samprate, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+    # dsobj = ndk.ds.spike2(recfile)
+    dataset = recfile.split('/')
+    iprint(recfile)
+    iprint(dataset[-1])
+    dsobj = ndk.ds.open(recfile, dbname)
+    if filtering:
+        dsobj.filter_data(lo, hi, 6)
+
+
+colortab = ( (1.0, 0.0, 0.0),
+             (0.0, 1.0, 0.0),
+             (1.0, 1.0, 0.0),
+             (0.0, 0.0, 1.0),
+             (1.0, 0.0, 1.0),
+             (0.0, 1.0, 1.0),
+             (1.0, 1.0, 1.0)
+)
+
+
+def plot_spike(es, spike_id):
+    global nspikes, sl, coef_limit, spike_limit
+    iprint("Spike ID: {}".format(spike_id))
+    ts = es.get_spike_time(spike_id)
+    bk = es.get_spike_basisid(spike_id)
+    seq = es.get_basis(bk)
+    winsize = len(seq[0])
+    wh = winsize / 2
+
+    nplt = nc + 3
+    if ns.pp:
+        ncols = 3
+    else:
+        ncols = 2
+
+    # Not working:
+    if sl == None:
+        plt.subplot(nplt, ncols, ncols*nc+4)
+        ax = plt.gca()
+        sl = Slider(ax, 'Spike', 0.0, nspikes, spike_id)
+
+    # Plots the basis functions: Consider removing this and placing in
+    # a separate file / plot window:
+    plt.subplot(nplt, ncols, (ncols*nc+3, ncols*nc+4))
+    ax = plt.gca()
+
+    ax.clear()
+    for s in seq:
+        plt.plot(s, color='yellow')
+    ax.set_xlabel("Sample")
+    # ax.set_axis_bgcolor('grey')
+    ax.set_facecolor('grey')
+    ax.set_ylabel("Basis {} Functions".format(bk))
+    ax.grid(True)
+
+    d = np.zeros(nchannels)
+    tot = np.zeros(nchannels)
+    # Per-channel plots:
+    iprint("nchannels = {}".format(nchannels))
+    c0 = 0
+    c1 = nchannels
+    # If the user asked for a specific channel, plot only that
+    # channel:
+    if ns.channel >= 0:
+        c0 = ns.channel
+        c1 = c0 + 1
+    # kn is the number of plots we're asking for, starting at zero:
+    kn = 0
+    for k in range(c0, c1):
+        a = es.get_spike_coefs(spike, k)
+        cluster = es.get_spike_label(spike)
+        if ns.raw or ns.diff:
+            # Grab the raw window, where ts is aligned with the center:
+            t0 = ts - wh
+            t1 = t0 + winsize - 1
+            x = dsobj.get_chunk(k, t0, t1)
+            if ns.zeromean:
+                x = x - x.mean()
+            # print(x)
+
+        y = ndk.features.gen_waveform(a, seq)
+        dy = ndk.features.deriv(y)
+        dy[ 0] = 0.5 * (y[-1] - y[1])
+        dy[-1] = 0.5 * (y[-2] - y[0])
+
+        # kn is the number of plots we're asking for, starting at zero:
+        if ns.pp:
+            pnum = 3*kn
+        else:
+            pnum = 2*kn
+        kn += 1
+        #
+        # Plot the spike amplitude and possibly its time derivative:
+        #
+        plt.subplot(nplt, ncols, pnum+1)  #, xmargin=0.5)
+        ax = plt.gca()
+        ax.clear()
+        # ax.set_axis_bgcolor('grey')
+        ax.set_facecolor('grey')
+        if cluster != None:
+            j = cluster % len(colortab)
+            color = colortab[j]
+            for spine in ax.spines.values():
+                spine.set_edgecolor(color)
+        if ns.diff:
+            plt.plot(x-y[1:], color='purple')
+        if ns.raw or ns.diff:
+            plt.plot(x, color='red')
+            #print(x)
+        plt.plot(y, color='blue')
+        if ns.pp:
+            plt.plot(dy * 0.001, color='green')
+        ax.set_xlabel("Sample")
+        ax.set_ylabel("Mag.")
+        if ns.fix:
+            ax.set_ylim([-spike_limit,spike_limit])
+        ax.grid(True)
+        ax.set_xticks(ax.get_xticks()[::2])
+        ax.set_yticks(ax.get_yticks()[::2])
+        plt.draw()
+
+        #
+        # Plot the coefficients as a bar chart (second column):
+        #
+        ax = plt.subplot(nplt, ncols, pnum+2)  #, xmargin=0.5)
+        #ax = plt.gca()
+        n = len(a)
+        xb = np.arange(n) + 1
+        wb = 0.2
+        ax.yaxis.tick_right()
+        ax.yaxis.set_label_position('right')
+        ax.clear()
+        ax.set_xlabel("Coef.")
+        ax.set_xticklabels(range(0,len(a)))
+        ax.set_ylabel("Mag.")
+        #ax.set_axis_bgcolor
+        ax.set_facecolor('grey')
+        if ns.fix:
+             ax.set_ylim([-coef_limit,coef_limit])
+        ax.bar(xb, a, align='center', alpha=0.5, color='blue')
+        ax.grid(True)
+        # ax.set_xticks(ax.get_xticks()[:-2])
+        ax.set_xticks(ax.get_xticks()[::2])
+        ax.set_yticks(ax.get_yticks()[::2])
+        plt.draw()
+
+        # When requested, create phase-space plots of the spike:
+        if ns.pp:
+            plt.subplot(nplt, ncols, pnum+3)  #, xmargin=0.5)
+            ax = plt.gca()
+            ax.clear()
+            plt.plot(y, dy, color='red')
+            ax.set_xlabel("w")
+            ax.set_ylabel("w'")
+            ax.grid(True)
+            # ax.set_xticks(ax.get_xticks()[:-2])
+            ax.set_xticks(ax.get_xticks()[::2])
+            ax.set_yticks(ax.get_yticks()[::2])
+            plt.draw()
+
+        if ns.raw:
+            for i in range(len(x)):
+                diff = x[i] - y[i]
+                d[k] += diff*diff
+                tot[k] += x[i] * x[i]
+            d[k] = d[k] / tot[k]
+
+    return d
+
+
+def press(event):
+    global esobj
+    if event.key == ' ' or event.key == '+':
+        k = next_spike_id()
+        d = plot_spike(esobj, k)
+        iprint('Spike {}; RMS error = {}'.format(spike, math.sqrt(d.sum())))
+    elif event.key == '-':
+        k = prev_spike_id()
+        d = plot_spike(esobj, k)
+        iprint('Spike {}; RMS error = {}'.format(spike, math.sqrt(d.sum())))
+    elif event.key == 'q':
+        iprint('Quitting...')
+        quit()
+
+if ns.cluster != None:
+    esobj.execute('select spikeID from spikelabels where label = {};'.format(ns.cluster))
+    result = esobj.fetchall()
+    spike_indices = []
+    for r in range(0,len(result)):
+        spike_indices.append(result[r][0])
+
+plt.connect('key_press_event', press)
+plot_spike(esobj,spike_indices[spike])
+plt.show()
+
+iprint('plt.show() returned.')
+
+esobj.close()

@@ -1,0 +1,92 @@
+#!/usr/bin/env python
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import numpy as np
+
+# Given a cluster, "rebasis" that cluster: Collect the raw data
+# waveforms for each spike, then compute residual as a function of
+# sigma to see if there is an optimum:
+
+parser = argparse.ArgumentParser(description='Visualize waveforms and coefficients, optionally compare to raw data.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-cluster', type=int, default=0, help='Collects statistics for the specified cluster (label)..')
+parser.add_argument('-channel', type=int, default=0, help='Collects statistics on the specified channel)..')
+parser.add_argument('-window', type=float, default=2.0, help='Default width in ms for measuring residuals.')
+ns = parser.parse_args()
+
+#
+# Simply opens, reads waveforms, estimates their derivatives, averages
+# those conditionally, and emits the mean and sigma for each point in
+# the window.
+#
+dbname = ns.files[0]
+if dbname == None:
+    print( "You must supply a database name." )
+    exit()
+
+esobj = db.open_event_store(dbname)
+if esobj==None:
+    print( "Data store "+dbname+" does not exist!" )
+    quit()
+
+channel = ns.channel
+samprate, nchannels, recfile = esobj.get_metadata()
+dsobj = ndk.ds.open(recfile)
+nspikes = esobj.get_spike_count()
+spike_ids = []
+seq = None
+# Conversion factor to change sigma from units of samples to units of seconds:
+sconv = 1000.0 / samprate
+
+winsize = int(ns.window / sconv)
+wh = winsize / 2
+print('Using a window size of {}.'.format(winsize))
+
+esobj.execute('select spikeID from spikelabels where label = {};'.format(ns.cluster))
+result = esobj.fetchall()
+spike_indices = []
+m = len(result)
+for r in range(m):
+    spike_ids.append(result[r][0])
+all_raw = np.zeros((m, winsize))
+
+print('Collecting data on {} spikes from cluster {}.'.format(m, ns.cluster))
+i = 0
+for k in spike_ids:
+    ts = esobj.get_spike_time(k)
+    t0 = ts - wh
+    t1 = t0 + winsize - 1
+    x = dsobj.get_chunk(channel, t0, t1)
+    all_raw[i,:] = x[:]
+    i += 1
+
+print('Raw data collected.  Now computing residuals as a function of sigma.')
+
+max_sigma = 24
+sigma = 6.0
+ds = 0.1
+nfuncs = 5
+minsigma = None
+minres = None
+while sigma < max_sigma:
+    seq = ndk.features.gaussian_basis(sigma, winsize, nfuncs)
+    residual = 0.0
+    for i in range(m):
+        x = all_raw[i,:]
+        coefs = ndk.features.waveform_coefs(x, seq)
+        w = ndk.features.gen_waveform(coefs, seq)
+        diff = np.square(w[:] - x[:]).sum()
+        residual += math.sqrt(diff)
+    print('{} {} {}'.format(sigma, sconv*sigma, residual))
+    if ( minres == None or residual < minres ):
+        minres = residual
+        minsigma = sigma
+    sigma += ds
+
+print('# Minimum residual = {} at sigma = {}'.format(minres, sconv*minsigma))
+

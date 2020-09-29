@@ -1,0 +1,123 @@
+#!/usr/bin/env python
+
+import sys
+import math
+import argparse
+import numpy as np
+import ndk.es.db3 as db
+import theano
+import theano.tensor as tensor
+from theano.tensor.nnet import conv2d
+# import matplotlib
+
+parser = argparse.ArgumentParser(description='Profile an event source, emitting mean amplitudes and ISIs.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
+parser.add_argument('-window', type=int, default=100000, help='Window to use (in samples) to average the desired quantities.')
+parser.add_argument('-channel', type=int, default=0, help='Channel to use to average amplitudes.')
+parser.add_argument('-event', default=None, help='If supplied, the event number to start at.')
+parser.add_argument('-step', type=int, default=10000, help='Step size to use for windowing.')
+ns = parser.parse_args()
+
+esname = ns.files[0]
+
+esobj = db.open_event_store(esname)
+
+start_time, end_time = esobj.get_dataset_interval()
+
+if ns.event is not None:
+    sys.stderr.write('# Looking for event {}\n'.format(ns.event))
+    eventnum = ns.event
+    event_list = esobj.get_events()
+    for ts, enum in event_list:
+        if enum == eventnum:
+            sys.stderr.write('# Found event at {}\n'.format(ts))
+            start_time = ts
+
+window = ns.window
+step = ns.step
+chan = ns.channel
+time = start_time
+rate = esobj.sample_rate
+pp = 0
+
+nspikes = esobj.get_spike_count()
+
+esobj.execute('select spikeID, samplenum from spiketimes order by samplenum')
+r = esobj.fetchall()
+
+#
+# Strategy for computing in GPU:
+#
+# 1) Create one "amplitude" vector that is as long as the number of
+# samples.  This can be quite large, but try anyway.  Later we can
+# devise strategies to break the computation into blocks.
+#
+# 2) Pick a window size and convolve: average spike count ignores
+# amplitude and just counts the number of events per each window.  The
+# counting can be unweighted (box) or weighted (e.g. gaussian) but
+# results in a count-per-window.
+#
+# 3) Mean amplitude is the weighted sum of amplitudes per window,
+# normalized by spike count-per-window.
+#
+# 4) At this point we can extract the values and write them out,
+# normalized by window size.
+#
+t0 = r[0][1]
+t1 = r[-1][1]
+
+nsamp = (t1 - t0) + 1
+times = np.zeros(nsamp, dtype=np.float32)
+amps = np.zeros(nsamp, dtype=np.float32)
+
+
+for i in range(len(r)):
+    ispike = r[i][1] - t0
+    if ispike >= nsamp:
+        sys.stderr.write('Too many samples? ({})\n'.format(ispike))
+    times[ispike] = 1.0
+    w = esobj.get_spike_waveform(r[i][0], chan)
+    amps[ispike] = w.max() - w.min()
+    if i % 500 == 0:
+        sys.stderr.write('{} '.format(i))
+        sys.stderr.flush()
+
+esobj.close()
+
+weights = np.ones(window, dtype=np.float32)
+
+sys.stderr.write('Setup complete.\n')
+
+# At this point, we have two arrays, times and amps, that describe the
+# spike train of interest.  Our profile operation looks for mean
+# amplitude and frequency, and we should allow uniform vs. normally
+# distributed weights (box vs. gaussian).
+
+x = tensor.tensor4('x', dtype='float32')  # Input signal (could be multichannel here!)
+a = tensor.tensor4('a', dtype='float32')  # Input signal (could be multichannel here!)
+kernel =  tensor.tensor4('kernel', dtype='float32')   # windowing function
+
+mean_count = conv2d(x, kernel, border_mode='half', filter_flip=False) # filter_flip=False means correlate
+mean_amp = conv2d(a, kernel, border_mode='half', filter_flip=False) # filter_flip=False means correlate
+
+fun = theano.function([x, a, kernel], [mean_count, mean_amp])
+
+sys.stderr.write('calling fun...\n')
+
+counts, means = fun(times.reshape(1,1,1,nsamp), amps.reshape(1,1,1,nsamp), weights.reshape(1,1,1,window))
+
+sys.stderr.write('shape of counts: {}\n'.format(counts.shape))
+sys.stderr.write('shape of means: {}\n'.format(means.shape))
+sys.stderr.write('nsamp = {}; step = {};\n'.format(nsamp, step))
+
+time = t0
+for i in range(0, nsamp, step):
+    time = t0 + i
+    cval = counts[0,0,0,i]
+    mval = means[0,0,0,i]
+    if cval == 0:
+        mean_amp = 0.0
+    else:
+        mean_amp = mval / cval
+    freq = (cval / window) * rate
+    print('{} {} {}'.format(time/rate, mean_amp, freq) )

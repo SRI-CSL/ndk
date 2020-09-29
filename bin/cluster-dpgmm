@@ -1,0 +1,69 @@
+#!/usr/bin/env python
+
+import sys
+import ndk
+import ndk.es.db3 as db
+import numpy
+import argparse
+import sklearn.mixture as skmix
+from sklearn.decomposition import PCA
+
+def pca_reduce(parray, ncomp=3):
+    p = PCA(n_components=ncomp)
+    pf = p.fit(parray)
+    return pf.transform(parray)
+
+
+#
+# Dirichlet Process Gaussian mixture model:
+#
+def dpgmm_cluster(x, n_gmm_comp=3, covars='full', n_iter=100):
+    g = skmix.BayesianGaussianMixture(n_components=n_gmm_comp, covariance_type=covars, max_iter=n_iter)
+    gf = g.fit(x)
+    print ("GMM convergence: {}".format(g.converged_))
+    return gf.predict(x)
+#    g = DPGMM(n_components=n_gmm_comp, alpha=alpha, covariance_type=covars, n_iter=n_iter)
+#    g.fit(x)
+#    return g.predict(x)
+
+
+
+def dpgmm_relabel(ds, coefs, alpha=1.0, n_pca_comp=0, n_gmm_comp=3, covars='diag', n_iter=100):
+    vals,ts = ds.get_coef_array(coefs)
+    pwr = vals.T
+
+    if (n_pca_comp > 0):
+        x = pca_reduce(pwr, n_pca_comp)
+    else:
+        x = pwr
+
+    l = dpgmm_cluster(x, n_gmm_comp, covars, n_iter)
+
+    for i in range(0,len(l)):
+        ds.set_spike_label(i, l[i])
+
+
+parser = argparse.ArgumentParser(description='Uses a Dirichlet Process Gaussian Mixture Model for almost unsupervised clustering of the dataset.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-coefs', default='0:0,0:1,0:2', help='Comma-separated coefficients to use for clustering of the form <coef>:<chan>.')
+parser.add_argument('-ncomp', type=int, default=3, help='Number of PCA components to use for dimensionality reduction.')
+parser.add_argument('-gcomp', type=int, default=5, help='Number of Gaussian components to try.')
+parser.add_argument('-niter', type=int, default=300, help='Number of iterations.')
+#parser.add_argument('-alpha', type=float, default=1.0, help='Dirichlet Process concentration parameter.')
+ns = parser.parse_args()
+
+filename = ns.files[0]
+coefs = ndk.features.parse_coef_spec(ns.coefs)
+print(coefs)
+ncomp = ns.ncomp
+gcomp = ns.gcomp
+#a = ns.alpha
+
+dbobj = db.open_event_store(filename)
+if dbobj != None:
+    dpgmm_relabel(dbobj, coefs, n_pca_comp=ncomp, n_gmm_comp=gcomp, n_iter=ns.niter)
+    h = dbobj.label_histogram()
+    print( 'Label counts:' )
+    for i in range(len(h)):
+        print( 'label {}: {}'.format(i, h[i]) )
+    dbobj.close()

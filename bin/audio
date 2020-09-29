@@ -1,0 +1,381 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+# Generate audio waveforms from a db file.  Approximately reconstructs
+# the original signal from a specific channel.
+
+# NOT TO BE CONFUSED WITH ndk2wav !!!!  The difference is:
+#
+# ndk2wav: converts RAW DATA to wav format, with optional filtering
+# and event-based extraction.
+#
+# audio: Performs reconstruction based on sorted spikes, NOT raw data,
+# and emits a wav file for that reconstruction.
+
+import sys
+import struct
+import argparse
+import ndk.es.db3 as db
+import numpy
+import wave
+from numpy import random
+from math import sin, pi, sqrt
+import os.path
+from ndk.ui import iprint,wprint,eprint
+import ndk.features
+
+NONE = 0
+AMPLITUDE = 1
+TIME = 2
+ALL = 3
+
+parser = argparse.ArgumentParser(description='Generate audio from an sqlite3 database file: RECONSTRUCTION based on sorted spikes.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-channel', type=int, default=0, help='Base channel to use for spike extraction.')
+parser.add_argument('-start', type=int, default=-1, help='Starting timestamp (sample number).')
+parser.add_argument('-clusters', default=None, help='A list of clusters (labels) to use to create the output.  Default=all.')
+parser.add_argument('-end', type=int, default=-1, help='Ending timestamp (sample number).')
+parser.add_argument('-permute', default='none', help='Permutations to apply.  Choices are "none", "time", "amplitude", and "all".')
+parser.add_argument('-fix', type=int, default=-1, help='If non-negative, will use the given spikeID to generate all spike waveforms (constant amplitude).')
+parser.add_argument('-random', type=int, default=-1, help='If non-negative, will use the given spikeID to generate a completely random spike train.')
+parser.add_argument('-wmin', type=float, default=-0.002, help='Minimum (float) value that a waveform can have in this dataset.')
+parser.add_argument('-wmax', type=float, default=0.002, help='Maximum (float) value that a waveform can have in this dataset.')
+parser.add_argument('-normalize', type=str, default='True', help='Whether to renormalize by recomputing wmin and wmax (default is True).')
+parser.add_argument('-coefs', default='all', help='Comma-separated list of coefficients to use for waveform reconstruction.  Default is all.')
+parser.add_argument('-pulse', default=None, type=int, help='Overrides -coefs to emit square wave pulses with the specified pulse width.')
+parser.add_argument('-carrier', type=float, default=0, help='Carrier frequency, if desired.')
+parser.add_argument('-outfile', default=None, help='Name of output file.')
+ns = parser.parse_args()
+
+dbname = ns.files[0]
+permute = NONE
+
+clusters = None
+if ns.clusters is not None:
+    clusters = [ int(x) for x in ns.clusters.split(',') ]
+
+if ns.coefs == 'all':
+    coefs = None
+else:
+    coefs = []
+    desc = ns.coefs.split(',')
+    for s in desc:
+        coefs.append(int(s))
+    iprint('Using coefficients {}'.format(coefs))
+    
+if ns.permute == 'none':
+    permute = NONE
+    iprint( 'Permutation: None' )
+elif ns.permute == 'time':
+    permute = TIME
+    iprint( 'Permutation: Time' )
+elif ns.permute == 'amp' or ns.permute == 'amplitude':
+    permute = AMPLITUDE
+    iprint( 'Permutation: Amplitude' )
+elif ns.permute == 'all' or ns.permute == 'both':
+    permute = ALL
+    iprint( 'Permutation: All' )
+else:
+    iprint( "Unrecognized permutation choice: " + ns.permute )
+    iprint( "Assuming 'none'" )
+
+if dbname == None:
+    iprint( "You must supply a database name." )
+    exit()
+
+outfile = ns.outfile
+if ns.outfile == None:
+    name = dbname.split('.')
+    outfile = name[0]+'.wav'
+    if os.path.isfile(outfile):
+        backup = outfile+'.bak'
+        os.rename(outfile, backup)
+
+iprint('Generating audio file {}.'.format(outfile))
+
+dbobj = db.open_event_store(dbname)
+
+if dbobj==None:
+    iprint( "Database file "+dbname+" does not exist!" )
+    quit()
+
+################################################################
+#
+# NOTE: We often perform these operations to pull out the metadata.
+# We should fold this into a class hierarchy that handles data
+# management for sqlite3, standard SQL, and hdf5:
+
+if dbobj.nchannels == 0:
+    iprint( "Uninitialized db file "+dbname+"!  Exiting." )
+    quit()
+
+#
+# Output is always created at the same sampling rate as data
+# collection:
+#samprate = dbobj.sample_rate
+#nchannels = dbobj.nchannels
+#recfile = dbobj.recfile
+#
+################################################################
+
+# The "default" carrier is just a DC signal (multiplies by 1):
+
+def dc_carrier(sampnum):
+    return 1.0
+
+
+if ns.carrier == 0:
+    carrier_fn = dc_carrier
+else:
+    carrier_fn = lambda x: sin(2.0 * pi * (ns.carrier * x / dbobj.sample_rate))
+
+outf = wave.open(outfile, 'w')
+outf.setnchannels(1)
+outf.setsampwidth(2)
+outf.setframerate(dbobj.sample_rate)
+
+start_time,end_time = dbobj.get_dataset_interval()
+if ns.start != -1:
+    start_time = ns.start
+if ns.end != -1:
+    end_time = ns.end
+
+iprint( "Dataset interval: [{}, {}]".format(start_time, end_time) )
+smin = 0.0
+sscale = 32767.0
+
+
+ssize = 4096
+sbuf = numpy.zeros(ssize, dtype='int16')
+# bbuf = numpy.getbuffer(sbuf)
+bbuf = sbuf.tobytes()
+sj = 0
+sbuf_count = 0
+
+def put_sample(x, f=outf, finish=False):
+    global ssize, sj, sbuf, bbuf, sbuf_count
+    # 'x' is assumed to be a float.  We convert it to an int16.
+    if finish == True:
+        sbuf[sj:] = 0
+        sj = ssize
+    else:
+        sbuf[sj] = int((x-smin) * sscale)
+        sj += 1
+
+    if sj >= ssize:
+        #outf.writeframes(bbuf)
+        outf.writeframes(sbuf)
+        sbuf_count += 1
+        if sbuf_count % 100 == 0:
+            print( '\rEmitting waveforms: {} '.format(sbuf_count), end="")
+            sys.stdout.flush()
+        sj = 0
+
+
+def irand(j, k):
+  r = numpy.random.randint(k)
+  if (k > j):
+      d = k - j
+      r = j + r % d
+  else:
+      d = j - k
+      r = k + r % d
+  return r
+
+#######
+###
+
+
+#
+# We keep mucking around with sox and Audacity's nyquist prompt, but
+# here let's just fold the carrier into the sample generation process.
+# The 'carrier' arg is a function that generates an optional carrier,
+# which is constant 1.0 by default.
+def spike_signal_out(ds, spike, interval, sampnum, channel=ns.channel, carrier=dc_carrier, scale=1.0):
+    # If present, 'carrier' is a function of sampnum that returns
+    # values in [-1,1], and this is multiplied with the spike waveform
+    # signal:
+    if interval > 0:
+        spike_id = spike[0]
+        k = ds.basis_cache[spike_id]
+        seq = ds.get_basis(k)
+        clist = ds.coefs_cache[spike_id]
+        a = numpy.zeros(len(clist))
+        for (c, j) in clist:
+            a[j] = c
+        
+        # Do we need any logic to conditionally emit spikes?
+        # wave = ds.get_spike_waveform(spike[0], channel, coefs)
+        wave = ndk.features.gen_waveform(a,seq)
+        if ns.pulse is not None:
+            mag = numpy.dot(wave,wave)
+            mag = 0.25 * sqrt(mag)
+            wave = ndk.features.gen_squarewave(len(wave), ns.pulse, mag)
+        if int(interval) > len(wave):
+            for i in range(int(interval)-len(wave)):
+                put_sample(0.0)
+                sampnum += 1
+            for i in range(len(wave)):
+                x = scale * wave[i] * carrier(sampnum)
+                put_sample(x)
+                sampnum += 1
+    return sampnum
+
+
+
+def map_spike_permuted(cur, which_perm, channel=ns.channel, window=None, carrier=dc_carrier, clusters=clusters):
+    # If supplied, 'window' should be a time interval:
+    print( window )
+    if window == None:
+        if clusters is None:
+            cur.execute('select * from spiketimes order by samplenum;')
+        else:
+            cur.execute("select * from spiketimes join spikelabels where spiketimes.spikeID = spikelabels.spikeID and spikelabels.label in {} order by samplenum".format(clusters))
+        times = cur.fetchall()
+        t0 = times[0][1]
+    else:
+        lo,hi = window
+        if clusters is None:
+            cur.execute('select * from spiketimes where samplenum >= {} and samplenum <= {} order by samplenum;'.format(lo,hi))
+        else:
+            cur.execute("select * from spiketimes join spikelabels where  samplenum >= {} and samplenum <= {} spiketimes.spikeID = spikelabels.spikeID and  spikelabels.label in {} order by samplenum".format(lo, hi, clusters))
+
+        times = cur.fetchall()
+        t0 = lo
+
+    nspikes = len(times)
+    iprint( "Emitting {} spikes.".format(nspikes) )
+    perm = numpy.zeros(nspikes, int)
+    last_sample = 0
+
+    # Fills the permutation array with non-permutation.  Have to
+    # change this logic if we want to implement restriction:
+    perm[:] = range(nspikes)
+
+    # initialize endpoints, delta; delta is used to fill between
+    # spikes:
+    i0 = perm[0]
+    i1 = perm[-1]
+    id,time = times[i0]
+    delta = time - t0
+    last_ts = time
+
+    # If any permutation was requested, then compute it here:
+    if which_perm > 0:
+        for i in range(nspikes):
+            j = irand(i,nspikes)
+            tmp = perm[i]
+            perm[i] = perm[j]
+            perm[j] = tmp
+
+    sampnum = 0
+    last_sample = end_time - t0
+
+    # Loop over all the spikes, emitting waveforms permuted
+    # appropriately:
+    iprint(' ')
+    for i in range(nspikes):
+#        if outf != sys.stdout and i % 100 == 0:
+#            iprint( i, )
+#            sys.stdout.flush()
+
+        j = perm[i]
+        # perm isn't doing anything yet, but it needs to be a
+        # permutation of INDICES into times:
+        spike = times[i]
+        if i > 0:
+            delta = times[i][1] - times[i-1][1]
+        
+        if which_perm == AMPLITUDE:
+            spike = times[j]
+        elif which_perm == TIME:
+            if i > 0:
+                if j == 0:
+                    delta = 0
+                else:
+                    delta = times[j][1] - times[j-1][1]
+        elif which_perm == ALL:
+            spike = times[j]
+            if i > 0:
+                if j == 0:
+                    delta = 0
+                else:
+                    delta = times[j][1] - times[j-1][1]
+
+        if ns.fix >= 0:
+            sampnum = spike_signal_out( cur, times[ns.fix], delta, sampnum, channel, carrier)
+        else:
+            sampnum = spike_signal_out( cur, spike, delta, sampnum, channel, carrier)
+
+        last_ts = spike[1]
+
+    if sampnum > last_sample:
+        delta = 0
+    else:
+        delta = last_sample - sampnum
+
+    # This is just buffering at the end - in cases where delta is
+    # large, though, we shouldn't have to add so many null samples:
+    iprint('delta: {}'.format(delta))
+    if last_sample > sampnum and delta < 20000:
+        for i in range(int(delta)-16):  # bad - but this is an offset needed in vcoefs
+            put_sample(0)
+    print(' ')
+    return nspikes
+
+
+
+def random_spike_train(cur, window, channel=ns.channel, carrier=dc_carrier):
+    # We need to supply window:
+    lo,hi = window
+    cur.execute('select * from spiketimes where samplenum >= {} and samplenum <= {} order by samplenum;'.format(lo,hi))
+    times = cur.fetchall()
+    t0 = lo
+    nspikes = len(times)
+    iprint( "Emitting {} spikes.".format(nspikes) )
+
+    last_sample = 0
+    delta = 0
+    sampnum = 0
+    spike = []
+    spike.append(0)
+    spike.append(0)
+
+    # Loop over all the spikes, emitting waveforms permuted
+    # appropriately:
+    iprint( "Emitting waveforms: ")
+    sampnum = lo
+    while sampnum < hi:
+        delta = numpy.random.randint(1000)
+        scale = numpy.random.random(1)[0]
+        sampnum = spike_signal_out( cur, times[ns.random], delta, sampnum, channel, carrier, scale)
+    return nspikes
+
+
+if ns.normalize == "True":
+    # int wmin, wmax
+    wmin, wmax = dbobj.waveform_min_max(ns.channel)
+    iprint('Waveform min,max = [{},{}]'.format(wmin, wmax))
+    if -wmin > wmax:
+        wmax = -wmin
+    else:
+        wmin = -wmax
+else:
+    wmin = ns.wmin
+    wmax = ns.wmax
+
+smin = wmin + 0.5 * (wmax-wmin)
+#sscale = 32767.0 / (wmax-wmin)
+#smin = wmin
+sscale = 65535.0 / (wmax-wmin)
+
+dbobj.init_coef_cache(ns.channel)
+
+if ns.random >= 0:
+    random_spike_train(dbobj, (start_time,end_time), ns.channel, carrier=carrier_fn)
+else:
+    map_spike_permuted(dbobj, permute, ns.channel, window=(start_time,end_time), carrier=carrier_fn)
+put_sample(0.0, finish=True)
+outf.close()
+iprint( "{} samples written.".format(sbuf_count * ssize) )
+dbobj.close()

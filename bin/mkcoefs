@@ -1,0 +1,129 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import sys
+import ndk.ds
+import ndk.features
+import ndk.es.db3 as db
+import math
+import argparse
+import sqlite3
+import quantities as pq
+import numpy as np
+from neo import io
+from scipy.signal import convolve, decimate
+from ndk.ui import iprint,wprint,eprint
+
+# mkspikes populates a database file with spike times and spike basis
+# numbers.  These correspond to the 'spiketimes' and 'spikebasis'
+# tables.  Uses the basis scoring function to localize peaks in the
+# score and mark spikes.
+
+parser = argparse.ArgumentParser(description='Populate an sqlite3 database file with spike timestamps.')
+parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file')
+parser.add_argument('-zeromean', dest='zeromean', action='store_true', help='If provided, remove the local signal mean before computing coefficients.')
+# Consider that we are detecting spikes after filtering the signal.
+# How should we handle this issue when computing coefficients?
+#parser.add_argument('-filter',  default="300:4000")
+parser.add_argument('-filter',  default="300:2000")
+parser.add_argument('-basisid', type=int, default=None, help='If provided, only compute coefficients for those spikes with the given basis ID.')
+ns = parser.parse_args()
+
+def parse_filter_args(arg):
+    [lowstr, highstr] = arg.split(':')
+    if len(lowstr) == 0:
+        lo = None
+    else:
+        lo = float(lowstr)
+
+    if len(highstr) == 0:
+        hi = None
+    else:
+        hi = float(highstr)
+
+    return lo,hi
+
+
+if ns.filter.find(':') == -1:
+    filter = False
+    iprint( "No filtering." )
+    lo = 0
+    hi = 0
+else:
+    filter = True
+    lo, hi = parse_filter_args(ns.filter)
+    iprint( "Filtering:  Low cutoff at {} Hz, high cutoff at {} Hz.".format(lo, hi) )
+
+dbfile = ns.files[0]
+
+if dbfile == None:
+    eprint( "You must supply a database name." )
+    exit()
+
+dbobj = db.open_event_store(dbfile)
+if dbobj==None:
+    eprint( "Data store "+dbfile+" does not exist!" )
+    quit()
+
+samprate, nchannels, uri = dbobj.get_metadata()
+iprint( "sample rate = {}; nchannels = {}; URI = {}".format( samprate, nchannels, uri ))
+
+dsobj = ndk.ds.open(uri, dbfile)
+if filter:
+    dsobj.filter_data(lo, hi, 6)
+
+#lfp_vec, samprate2, t0, t1, seg = ndk.ds.read_raw_data(recfile)
+#nchannels = len(lfp_vec)
+
+dbobj.make_spikecoefs_table()
+
+bases = {}
+
+def basis_exists(k):
+    ret = True
+    try:
+        j = bases[k]
+        ret = True
+    except:
+        ret = False
+    return ret
+
+if ns.basisid is None:
+    dbobj.execute('SELECT spikebasis.spikeID, samplenum, basisID FROM spikebasis JOIN spiketimes WHERE spikebasis.spikeID=spiketimes.spikeID;')
+else:
+    dbobj.execute('SELECT spikebasis.spikeID, samplenum, basisID FROM spikebasis JOIN spiketimes WHERE spikebasis.spikeID=spiketimes.spikeID and spikebasis.basisID={};'.format(ns.basisid))
+
+result = dbobj.fetchall()
+iprint( "Channels: {}".format( nchannels ) )
+
+print(' ')
+for (id, ts, bk) in result:
+    if not basis_exists(bk):
+        bases[bk] = dbobj.get_basis(bk)
+
+    seq = bases[bk]
+    winsize = len(seq[0])
+    wh = winsize / 2
+    for k in range(0,nchannels):
+        # Grab the raw window, where ts is aligned with the center:
+        t0 = ts - wh
+        t1 = t0 + winsize - 1
+        x = dsobj.get_chunk(k, t0, t1)
+        if ns.zeromean:
+            x = x - x.mean()
+        nx = len(x) - winsize
+        if nx < 0:
+            xp = np.zeros(winsize)
+            xp[0:nx] = x[:]
+            x = xp
+        coefs = ndk.features.waveform_coefs(x.reshape(winsize), seq)
+        dbobj.set_spike_coefs(id, k, coefs)
+    if id % 100 == 0:
+        print( "\rCoefs: {} ".format(id), end=" ")
+        sys.stdout.flush()
+
+cmd = ' '.join(sys.argv)
+iprint("logging: {}".format(cmd))
+dbobj.add_history('"{}"'.format(cmd))
+
+dbobj.close()

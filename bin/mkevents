@@ -1,0 +1,6 @@
+#!/usr/bin/env python
+
+# Pull out the discrete events (e.g., injection times) from an smr
+# file.
+
+print('mkevents is not yet implemented.')
