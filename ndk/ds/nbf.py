@@ -336,7 +336,7 @@ class nbf:
                 x = self.filtered_data[channel]
             except:
                 x = self.raw[channel]
-                iprint("Initializing filtered copy")
+                iprint("In get_chunk({},{},{},{}): Initializing filtered copy".format(self, channel, start, end))
                 self.filtered_data[channel] = self.dsf.maybe_filter(x)
                 x = self.filtered_data[channel]
             # Most likely, we reached an edge, so just return a 0 vector:
