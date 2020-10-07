@@ -7,7 +7,7 @@ from ndk.ui import iprint,wprint,eprint
 import ndk.ds
 
 NEW_NBM = True
-
+NEW_FILTERING = True
 #
 # nbf = NDK Binary Format: This is a pyramid-style "native"
 # representation for NDK.
@@ -165,6 +165,7 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
 
     md.save(source)
 
+    # Initialize the raw data file:
     rawfile = md.rawfile()
     iprint('Mapping raw file {} using shape {}.'.format(rawfile, data_shape))
     raw = np.memmap(rawfile, np.dtype('f4'), 'w+', shape=data_shape)
@@ -229,6 +230,7 @@ class nbf:
         self.lazy = False
     
         dirname = os.path.dirname(self.filename)
+        self.dirname = dirname
         iprint('Using directory {}'.format(dirname))
 
         # These are defaults, can be overridden later:
@@ -304,6 +306,47 @@ class nbf:
         iprint('Mapping raw file with shape {}...'.format(self.data_shape))
         self.raw = np.memmap(rawfile, np.dtype('f4'), 'r+', shape=self.data_shape)
 
+
+    def make_filtered_data(self, force=False):
+        """Makes a cache of the filtered data, with filter parameters specified by the dsf object."""
+        dsf = self.dsf
+        dir = self.dirname
+        fdatafile = os.path.join(dir, 'filtered_{}_{}.raw'.format(dsf.lo, dsf.hi) )
+        if force or not os.path.exists(fdatafile):
+            iprint('Creating raw file {} using shape {}.'.format(fdatafile, self.data_shape))
+            fdata = np.memmap(fdatafile, np.dtype('f4'), 'w+', shape=self.data_shape)
+            iprint('Initializing filtered data file: {}'.format(fdatafile))
+            for k in range(self.data_shape[0]):
+                data = dsf.maybe_filter(self.raw[k])
+                fdata[k,:] = data[:]
+            # print(raw)
+            del fdata
+
+
+    def map_filtered_data(self):
+        """Maps filtered data files into memory for direct access to filtered data."""
+        dsf = self.dsf
+        dir = self.dirname
+        if len(self.filtered_data) == 0:
+            fdatafile = os.path.join(dir, 'filtered_{}_{}.raw'.format(dsf.lo, dsf.hi) )
+            iprint('Checking for filtered data file: {}'.format(fdatafile))
+        
+            if not os.path.exists(fdatafile):
+                self.make_filtered_data()
+        
+            iprint('Mapping filtered data file with shape {}...'.format(self.data_shape))
+            self.filtered_data = np.memmap(fdatafile, np.dtype('f4'), 'r+', shape=self.data_shape)
+
+
+
+
+    def get_filtered_data(self, channel):
+        if not self.dsf.do_filter:
+            return self.raw[channel]
+        else:
+            self.map_filtered_data()
+            return self.filtered_data[channel]
+            
         
     def get_dataset_interval(self):
         """Returns the time interval corresponding to this dataset, as sample numbers."""
@@ -331,20 +374,27 @@ class nbf:
             x = self.raw[channel]
             r = x[i0:i1].reshape(i1-i0)
             result = self.dsf.maybe_filter(r)
+        elif NEW_FILTERING:
+            x = self.get_filtered_data(channel)
         else:
+            # If we miss with filtered_data, run the filter and add it
+            # to the filtered_data dictionary.  This is where we could
+            # try filesystem caching:
             try:
                 x = self.filtered_data[channel]
-            except:
+            except KeyError:
                 x = self.raw[channel]
                 iprint("In get_chunk({},{},{},{}): Initializing filtered copy".format(self, channel, start, end))
+                #self.get_filtered_data(x, channel)
                 self.filtered_data[channel] = self.dsf.maybe_filter(x)
                 x = self.filtered_data[channel]
+        try:
+            result = x[i0:i1].reshape(i1-i0)
+        except:
             # Most likely, we reached an edge, so just return a 0 vector:
-            try:
-                result = x[i0:i1].reshape(i1-i0)
-            except:
-                result = np.zeros((i1-i0))
-            # result = result.reshape(len(r))
+            result = np.zeros((i1-i0))
+        # result = result.reshape(len(r))
+                
         return result
 
     def get_chunk1(self, channel, start, end):
