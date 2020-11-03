@@ -10,7 +10,7 @@ import argparse
 import sqlite3
 import quantities as pq
 import numpy as np
-from scipy.signal import convolve, decimate, fftconvolve, butter, lfilter
+from scipy.signal import convolve, decimate, fftconvolve, butter, lfilter, filtfilt
 from uritools import urisplit
 from ndk.ui import iprint,wprint,eprint
 import ndk.ui as ui
@@ -25,12 +25,43 @@ parser.add_argument('-channel', type=int, default=0, help='Base channel to use f
 parser.add_argument('-percent', type=float, default=98, help='Rejection percentage.  Th bottom p percent of spikes are rejected.  p=99.5 by default.')
 parser.add_argument('-threshold', type=float, default=None, help='Threshold to use (instead of percent).')
 parser.add_argument('-filter',  default="160:2000")
-parser.add_argument('-resp', dest='resp', action='store_true', default=True, help='If provided, use low-pass filtering to detect respiration events.')
+parser.add_argument('-resp', dest='resp', action='store_true', default=False, help='If provided, use low-pass filtering to detect respiration events.')
 parser.add_argument('-positive', dest='positive', action='store_true', default=True, help='If provided, use positive scores for marking events (default action).')
 parser.add_argument('-negative', dest='negative', action='store_true', default=False, help='If provided, use negative scores for marking events.')
 parser.add_argument('-shift',  type=int, default=1, help='If provided, shift the actual timestamp by the specified number of samples.')
 parser.add_argument('-window', type=int, default=1048576, help='Window size in samples for piecewise processing.')
+parser.add_argument('-save', default=None, help='If provided, save the score signal to the file named in this argument.')
+parser.add_argument('-preset', default=None, choices=[None, 'cardiac', 'respiratory'], help='Use specific presets designed to extract certain feature types.')
 ns = parser.parse_args()
+
+
+presets = { 'cardiac'      : {'ns.channel':0, 'ns.filter' : ':300', 'ns.negative' : True },
+            'respiratory'  : {'ns.channel':0, 'ns.filter' : '1000:2000', 'ns.resp' : True } }
+
+
+if ns.preset is not None:
+    if ns.preset == 'help':
+        print('Available presets and their implied arguments:')
+        for key in presets:
+            print(key, ": ", presets[key])
+        quit()
+    else:
+        params = presets[ns.preset]
+        # Walk through and set options - overrides any prior command
+        # switches.
+        for key in params:
+            val = params[key]
+            if type(val) is str:
+                exec( "{}='{}'".format(key, params[key]) )
+            else:
+                exec( "{}={}".format(key, params[key]) )
+        
+        print(ns.channel)
+        print(ns.filter)
+        print(ns.negative)
+
+        
+# -channel 0 -filter :300 -negative -percent 98
 
 def parse_filter_args(arg):
     [lowstr, highstr] = arg.split(':')
@@ -248,17 +279,22 @@ def score_raw_thresholds(signal, n, wsize, thresh):
     sys.stdout.write('\n')
     return l_full
 
-
+def save_signal(sig, filename):
+    with open(filename, 'w') as f:
+        for x in sig:
+            f.write("{}\n".format(x))
 #
 # You MUST filter out low freqs (e.g., using a Butterworth filter)
 # and pass the filtered signal as sig:
 #
-def spike_peaks(sig, threshold, smoothing_width=31, sigma=6.0):
+def spike_peaks(sig, threshold, smoothing_width=31, sigma=6.0, save_sig=None):
 
     # This version is minimal - just find peaks, 1st derivatives, and
     # zero crossings:
     
     iprint('Threshold: {}'.format(threshold))
+    if save_sig is not None:
+        save_signal(sig, save_sig)
     upvec = sig > threshold
     iprint( 'Peak vector computed.' )
     sys.stdout.flush()
@@ -303,12 +339,15 @@ def spike_peaks(sig, threshold, smoothing_width=31, sigma=6.0):
 
 if ns.resp:
     iprint("Processing respiratory events...")
-    signal[:] = signal[:] * signal[:]
+    sigsq = signal[:] * signal[:]
     #signal = smooth_lfp(signal, width=8192, sigma=2048.0)
-    signal = smooth_lfp(signal, width=2048, sigma=512.0)
-    with open('/tmp/respdata.dat', 'w') as f:
-        for x in signal:
-            f.write( "{}\n".format(x) )
+    #    signal = smooth_lfp(sigsq, width=4096, sigma=4048.0)
+    f = 2 * 8 / samprate
+    b, a = butter(5, f, btype='lowpass')
+    signal = filtfilt(b, a, sigsq, padlen=0, axis=0)
+    with open('/tmp/respiro.dat', 'w') as f:
+        for i in range(64000):
+            f.write("{}\n".format(signal[i]))
 
 threshp = ns.percent / 100.0
 npts = len(signal)

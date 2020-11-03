@@ -193,6 +193,8 @@ def plot_spike(es, spike_id):
     kn = 0
     for k in range(c0, c1):
         a = es.get_spike_coefs(spike, k)
+        if a is None:
+            a = np.zeros(len(seq))
         cluster = es.get_spike_label(spike)
         if ns.raw or ns.diff:
             # Grab the raw window, where ts is aligned with the center:
@@ -203,10 +205,14 @@ def plot_spike(es, spike_id):
                 x = x - x.mean()
             # print(x)
 
-        y = ndk.features.gen_waveform(a, seq)
-        dy = ndk.features.deriv(y)
-        dy[ 0] = 0.5 * (y[-1] - y[1])
-        dy[-1] = 0.5 * (y[-2] - y[0])
+        try:
+            y = ndk.features.gen_waveform(a, seq)
+            dy = ndk.features.deriv(y)
+            dy[ 0] = 0.5 * (y[-1] - y[1])
+            dy[-1] = 0.5 * (y[-2] - y[0])
+        except:
+            y = np.zeros(len(seq[0]))
+            dy = np.zeros(len(seq[0]))
 
         # kn is the number of plots we're asking for, starting at zero:
         if ns.pp:
@@ -256,7 +262,7 @@ def plot_spike(es, spike_id):
         ax.yaxis.set_label_position('right')
         ax.clear()
         ax.set_xlabel("Coef.")
-        ax.set_xticklabels(range(0,len(a)))
+        ax.set_xticklabels(range(0,n))
         ax.set_ylabel("Mag.")
         #ax.set_axis_bgcolor
         ax.set_facecolor('grey')

@@ -30,6 +30,7 @@ parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, 
 parser.add_argument('-ts', dest='plot_ts', action='store_true', help='If provided, plots timestamps as vertical lines, color determined by label.')
 parser.add_argument('-cooked', dest='cooked', action='store_true', help='If provided, plots the db-generated waveforms.')
 parser.add_argument('-filter',  default="300:2000")
+parser.add_argument('-resp', dest='resp', action='store_true', default=False, help='If provided, use low-pass filtering to detect respiration events.')
 ns = parser.parse_args()
 
 lo = None
@@ -135,7 +136,13 @@ class Cursor(object):
         if ds == None:
             self.y = np.zeros(self.npts)
         else:
-            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            tmp = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            if ns.resp:
+                self.y = tmp[:] * tmp[:]
+            else:
+                self.y = tmp
+                #self.y[:] = smooth_lfp(self.y, width=2048, sigma=512.0)
+
         self.ymin = self.x.min()
         self.ymax = self.x.max()
 
@@ -178,7 +185,12 @@ class Cursor(object):
         if ns.cooked:
             self.x = self.es.get_signal(self.chan, self.x0, self.x0 + self.npts)
         if ns.raw:
-            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            tmp = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            if ns.resp:
+                self.y = tmp[:] * tmp[:]
+            else:
+                self.y = tmp
+                #self.y[:] = smooth_lfp(self.y, width=2048, sigma=512.0)
         else:
             self.y = np.zeros(self.npts)
         self.refresh(self.x0)
@@ -228,7 +240,12 @@ class Cursor(object):
         if ns.cooked:
             self.es.get_signal(self.chan, self.x0, self.x0 + self.npts, self.x)
         if ns.raw:
-            self.y = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            tmp = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
+            if ns.resp:
+                self.y = tmp[:] * tmp[:]
+            else:
+                self.y = tmp
+                #self.y[:] = smooth_lfp(self.y, width=2048, sigma=512.0)
         else:
             self.y = np.zeros(self.npts)
         self.ax1.clear()
