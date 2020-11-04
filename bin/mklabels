@@ -5,10 +5,8 @@ import os.path
 import argparse
 import ndk.es.db3 as db
 
-# mkdb initializes an sqlite3 database file using a recording file.
-# It initializes or checks the file's 'meta' table and verifies or
-# adds to the basis table.  It will refuse to do anything if there are
-# inconsistencies.
+# Trivial labeling: we need a variety of new features here.  This
+# version simply creates a bunch of labels for all spikes.
 
 parser = argparse.ArgumentParser(description='If necessary, create a spikelabels table in an sqlite3 database file for an LFP recording.')
 parser.add_argument('filename',  metavar='FILE', nargs=1, help='A database file to process')

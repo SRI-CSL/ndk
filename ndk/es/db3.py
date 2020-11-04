@@ -481,6 +481,10 @@ SAMPLES to the database, with the desired ID."""
         """Sets the spike channel for the given spike_id.  The sign of the spike channel number indicates whether it was a positive or negative detection."""
         self.cur.execute('INSERT or REPLACE into spikechannels values ({}, {});'.format(spike_id, channel))
 
+    def set_spike_basis(self, spike_id, basis):
+        """Sets the spike basis ID for the given spike_id."""
+        self.cur.execute('INSERT or REPLACE into spikebasis values ({}, {});'.format(spike_id, basis))
+
     def get_spike_label(self, spike_id):
         """Returns the channel number for the given spike_id.  This is simply the recording channel on which the spike was detected.  It can be positive or negative."""
         self.cur.execute('select channel from spikechannels where spikeID == {};'.format(spike_id))
