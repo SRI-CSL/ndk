@@ -15,6 +15,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from OpenGL.GL import *
 from OpenGL.GLUT import *
 from OpenGL.GLU import *
+from PIL import Image
 
 # Think about adding -start and -end args here - want to visualize a
 # subset of spikes in time:
@@ -63,13 +64,17 @@ def setGLRotation(y, x, m):
 
 class Viewer():
 
-    def __init__(self, dbobj, width=1024, height=768, window=128000):
+    def __init__(self, dbobj, width=1024, height=768, window=128000, name=None):
         # self.mode_alist = { 'q': quit , '+': zoom_in , '-': zoom_out }
         # Window dimensions
         self.ds = dbobj  # hmmm...
         self.xw = width
         self.yw = height
         self.initialized = False
+        if name is None:
+            self.name = dbobj.filename
+        else:
+            self.name = name
         # Scatter plot rotation:
         self.xrot = 0.0
         self.yrot = 0.0
@@ -119,7 +124,7 @@ class Viewer():
     def glInit(self):
         glutInit()
         glutInitWindowSize(self.xw, self.yw)
-        glutCreateWindow("Spike Coefs")
+        glutCreateWindow("Spike Coefs: {}".format(self.name))
         glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB)
         # Display callback:
         glutDisplayFunc(self.displayFun)
@@ -196,6 +201,13 @@ class Viewer():
             self.zscale = 0.5 * self.zscale
         elif key == b'Z':
             self.zscale = 2.0 * self.zscale
+        elif key == b's':   # Screenshot
+            glReadBuffer(GL_FRONT)
+            data = glReadPixels(0, 0, 1024, 768, GL_RGBA, GL_UNSIGNED_BYTE)
+            image = Image.frombytes("RGBA", (1024,768), data)
+            fname = os.path.basename(self.name).split('.')[0]
+            print("Saving screen shot to {}.png".format(fname))
+            image.save(fname+'.png', 'png')
         elif key == b'.':
             if self.mode == '.':
                 print("Rotation mode")

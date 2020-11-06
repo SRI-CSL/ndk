@@ -36,6 +36,7 @@ class db3():
         self.schema = schema()
         self.conn = s3.connect(filename)
         self.cur = self.conn.cursor()
+        self.filename = filename
         self.sample_rate = 0
         self.nspikes = 0
         self.nchannels = 0
@@ -658,6 +659,19 @@ SAMPLES to the database, with the desired ID."""
         except:
             print('# Unable to get events.')
         return events
+
+    def find_event(self, name):
+        """Returns a list of tuples for behavioral or external events, where the first elements are timestamps, and the second elements are event labels."""
+        times = []
+        self.cur.execute('SELECT samplenum from event where eventlabel="{}"'.format(name))
+        try:
+            r = self.cur.fetchall()
+            for j in range(len(r)):
+                ts = int( r[j][0] )
+                times += [ ts ]
+        except:
+            print('# Unable to find event.')
+        return times
 
 
     def get_metadata(self, verbose=False):

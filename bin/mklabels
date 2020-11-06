@@ -10,6 +10,10 @@ import ndk.es.db3 as db
 
 parser = argparse.ArgumentParser(description='If necessary, create a spikelabels table in an sqlite3 database file for an LFP recording.')
 parser.add_argument('filename',  metavar='FILE', nargs=1, help='A database file to process')
+parser.add_argument('-event', default=None, help='Name of an event to use for before/after labeling.')
+parser.add_argument('-before', type=int, default=1, help='Label to use for pre-event points (default=1).')
+parser.add_argument('-after', type=int, default=2, help='Label to use for post-event points (default=2).')
+parser.add_argument('-margin', type=int, default=-1, help='If provided, this represents a time window around the event to be marked.  Anything outside this window will be zero (red).')
 ns = parser.parse_args()
 
 dbname = os.path.abspath(ns.filename[0])
@@ -25,7 +29,31 @@ if dbobj==None:
     quit()
 
 dbobj.make_spikelabels_table()
-dbobj.make_default_labels()
+if ns.event is not None:
+    ts_list = dbobj.find_event(ns.event)
+    if len(ts_list) == 0:
+        print("Event {} was not found.  Not labeling.".format(ns.event))
+    else:
+        if (len(ts_list) > 1):
+            print("More than one time found for event {}.  Using the first.".format(ns.event))
+        event_ts = ts_list[0]
+        dbobj.execute("select spikeID, samplenum from spiketimes")
+        results = dbobj.fetchall()
+        for r in results:
+            spike_id = r[0]
+            ts = r[1]
+            if (ts < event_ts):
+                dbobj.set_spike_label(spike_id, ns.before)
+            else:
+                dbobj.set_spike_label(spike_id, ns.after)
+            if ns.margin > 0 and ( ts < event_ts - ns.margin or ts > event_ts + ns.margin ):
+                dbobj.set_spike_label(spike_id, 0)
+                    
+else:
+    try:
+        dbobj.make_default_labels()
+    except:
+        print("Unable to make default labels.")
 
 cmd = ' '.join(sys.argv)
 print("[I] logging: {}".format(cmd))
