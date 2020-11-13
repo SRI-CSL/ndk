@@ -4,8 +4,10 @@ import sys
 import ndk
 import ndk.es.db3
 import ndk.features
+import glob
 import math
 from math import sin, cos
+import time
 import argparse
 import sqlite3
 import numpy as np
@@ -32,6 +34,15 @@ ns = parser.parse_args()
 dbname = ns.files[0]
 basis = ns.basis
 ps = ns.pointsize
+
+def maybe_mkdir(dir):
+    try:
+        os.mkdir(dir)
+    except:
+        print("Cleaning and reusing {}.".format(dir))
+        files = glob.glob(dir+"/*")
+        for f in files:
+            os.remove(f)
 
 
 def setGLRotation(y, x, m):
@@ -114,7 +125,7 @@ class Viewer():
     def set_interval(self, begin, end):
         self.t0 = begin
         self.t1 = end
-        print("New interval: {},{}".format(begin,end))
+        # print("New interval: {},{}".format(begin,end))
         glutPostRedisplay()
 
 
@@ -150,6 +161,35 @@ class Viewer():
 
     def refresh_colors(self, basis=0, channel=ns.channel):
         self.color = self.ds.get_label_array(basis, channel)
+
+    def save_frame(self, fname=None):
+        w = glutGet(GLUT_WINDOW_WIDTH)
+        h = glutGet(GLUT_WINDOW_HEIGHT)
+        if fname is None:
+            fname = os.path.basename(self.name).split('.')[0]
+            print("Saving screen shot to {}.png".format(fname))
+        glReadBuffer(GL_FRONT)
+        data = glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE)
+        image = Image.frombytes("RGBA", (w,h), data)
+        image.save(fname+'.png', 'png')
+
+    def show_movie(self, save_frames=False, step=32000, window=200000):
+        global ps
+        ps = 3
+        self.window = window
+        start, end = dbobj.get_dataset_interval()
+        savedir = '.vscatter'
+        if save_frames:
+            maybe_mkdir(savedir)
+        i = 1
+        for ts in range(int(start), int(end), step):
+            self.set_interval(ts-self.window, ts+self.window)
+            self.displayFun()
+            if save_frames:
+                fname = savedir+"/frame-{0:04}".format(i)
+                self.save_frame(fname)
+            i += 1
+        ps = ns.pointsize
 
     def refresh_points(self, coefs, basis=0, relative=True):
         if ns.channel is None:
@@ -202,12 +242,11 @@ class Viewer():
         elif key == b'Z':
             self.zscale = 2.0 * self.zscale
         elif key == b's':   # Screenshot
-            glReadBuffer(GL_FRONT)
-            data = glReadPixels(0, 0, 1024, 768, GL_RGBA, GL_UNSIGNED_BYTE)
-            image = Image.frombytes("RGBA", (1024,768), data)
-            fname = os.path.basename(self.name).split('.')[0]
-            print("Saving screen shot to {}.png".format(fname))
-            image.save(fname+'.png', 'png')
+            self.save_frame()
+        elif key == b'm':
+            self.show_movie()
+        elif key == b'v':
+            self.show_movie(save_frames=True)
         elif key == b'.':
             if self.mode == '.':
                 print("Rotation mode")

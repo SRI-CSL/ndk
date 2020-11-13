@@ -14,6 +14,7 @@ parser.add_argument('-event', default=None, help='Name of an event to use for be
 parser.add_argument('-before', type=int, default=1, help='Label to use for pre-event points (default=1).')
 parser.add_argument('-after', type=int, default=2, help='Label to use for post-event points (default=2).')
 parser.add_argument('-margin', type=int, default=-1, help='If provided, this represents a time window around the event to be marked.  Anything outside this window will be zero (red).')
+parser.add_argument('-offset', type=int, default=0, help='offset for margin.  Points within offset of the event will be marked with label 3.')
 ns = parser.parse_args()
 
 dbname = os.path.abspath(ns.filename[0])
@@ -47,7 +48,12 @@ if ns.event is not None:
             else:
                 dbobj.set_spike_label(spike_id, ns.after)
             if ns.margin > 0 and ( ts < event_ts - ns.margin or ts > event_ts + ns.margin ):
-                dbobj.set_spike_label(spike_id, 0)
+                if (ts > event_ts) and (ts < event_ts + ns.offset):
+                    dbobj.set_spike_label(spike_id, 3)
+                elif (ts < event_ts) and (ts > event_ts - ns.offset):
+                    dbobj.set_spike_label(spike_id, 3)
+                else:
+                    dbobj.set_spike_label(spike_id, 0)
                     
 else:
     try:

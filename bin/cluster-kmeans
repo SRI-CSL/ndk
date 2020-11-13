@@ -24,8 +24,9 @@ def kmeans_cluster(x, n_clusters=4):
 
 
 def kmeans_relabel(ds, coefs, ncomp=2, nclust=4):
-    vals = ds.get_coef_array(coefs)
-    pwr = vals.T
+    vals,ts = ds.get_coef_array(coefs)
+    # wtf?
+    pwr = vals[:]*vals[:]
 
     if (ncomp > 0):
         x = pca_reduce(pwr, ncomp)

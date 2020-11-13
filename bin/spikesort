@@ -31,12 +31,14 @@ parser.add_argument('-negative', dest='negative', action='store_true', default=F
 parser.add_argument('-shift',  type=int, default=1, help='If provided, shift the actual timestamp by the specified number of samples.')
 parser.add_argument('-window', type=int, default=1048576, help='Window size in samples for piecewise processing.')
 parser.add_argument('-save', default=None, help='If provided, save the score signal to the file named in this argument.')
-parser.add_argument('-preset', default=None, choices=[None, 'cardiac', 'respiratory'], help='Use specific presets designed to extract certain feature types.')
+parser.add_argument('-nms', default=350, type=int, help='If provided, perform non-maximum suppression over this window.')
+parser.add_argument('-preset', default=None, choices=[None, 'cardiac', 'cardiac2', 'respiratory'], help='Use specific presets designed to extract certain feature types.')
 ns = parser.parse_args()
 
 
 presets = { 'cardiac'      : {'ns.channel':0, 'ns.filter' : ':300', 'ns.negative' : True },
-            'respiratory'  : {'ns.channel':0, 'ns.filter' : '1000:2000', 'ns.resp' : True } }
+            'cardiac2'     : {'ns.channel':0, 'ns.filter' : ':300', 'ns.negative' : False, 'ns.positive' : False },
+            'respiratory'  : {'ns.channel':0, 'ns.filter' : '1000:2000', 'ns.resp' : True, 'ns.nms' : None } }
 
 
 if ns.preset is not None:
@@ -365,6 +367,25 @@ else:
     thresh = ns.threshold
 zc = spike_peaks( signal, thresh, score_w, score_s )
 last = len(zc)
+
+if ns.nms is not None:
+    iprint("Performing non-maximum suppression with a window of {} samples.".format(ns.nms))
+    i = 0
+    ptime = None
+    pmag = None
+    k = 0
+    while i < last:
+        if zc[i] != 0:
+            if ptime is not None and (i-ptime) < ns.nms:
+                k += 1
+                if signal[i] < pmag:
+                    zc[i] = 0
+                else:
+                    zc[ptime] = 0
+            ptime = i
+            pmag = signal[i]
+        i += 1
+    iprint("{} non-maxima were suppressed.".format(k))
 
 i = 0
 iprev = 0
