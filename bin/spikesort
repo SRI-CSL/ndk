@@ -26,18 +26,18 @@ parser.add_argument('-percent', type=float, default=98, help='Rejection percenta
 parser.add_argument('-threshold', type=float, default=None, help='Threshold to use (instead of percent).')
 parser.add_argument('-filter',  default="160:2000")
 parser.add_argument('-resp', dest='resp', action='store_true', default=False, help='If provided, use low-pass filtering to detect respiration events.')
-parser.add_argument('-positive', dest='positive', action='store_true', default=True, help='If provided, use positive scores for marking events (default action).')
-parser.add_argument('-negative', dest='negative', action='store_true', default=False, help='If provided, use negative scores for marking events.')
+parser.add_argument('-peaks', default='positive', choices=['positive', 'negative', 'both'], help='If provided, use positive, negative, or both peak types for marking events.')
 parser.add_argument('-shift',  type=int, default=1, help='If provided, shift the actual timestamp by the specified number of samples.')
 parser.add_argument('-window', type=int, default=1048576, help='Window size in samples for piecewise processing.')
 parser.add_argument('-save', default=None, help='If provided, save the score signal to the file named in this argument.')
 parser.add_argument('-nms', default=350, type=int, help='If provided, perform non-maximum suppression over this window.')
+parser.add_argument('-average', dest='avg', action='store_true', default=False, help='If -nms is specified, use the average timestamp rather than suppressing the smaller peak.')
 parser.add_argument('-preset', default=None, choices=[None, 'cardiac', 'cardiac2', 'respiratory'], help='Use specific presets designed to extract certain feature types.')
 ns = parser.parse_args()
 
 
-presets = { 'cardiac'      : {'ns.channel':0, 'ns.filter' : ':300', 'ns.negative' : True },
-            'cardiac2'     : {'ns.channel':0, 'ns.filter' : ':300', 'ns.negative' : False, 'ns.positive' : False },
+presets = { 'cardiac'      : {'ns.channel':0, 'ns.filter' : ':300', 'ns.peaks' : 'negative' },
+            'cardiac2'     : {'ns.channel':0, 'ns.filter' : ':300', 'ns.peaks' : 'positive' },
             'respiratory'  : {'ns.channel':0, 'ns.filter' : '1000:2000', 'ns.resp' : True, 'ns.nms' : None } }
 
 
@@ -60,10 +60,10 @@ if ns.preset is not None:
         
         print(ns.channel)
         print(ns.filter)
-        print(ns.negative)
+        print(ns.peaks)
 
         
-# -channel 0 -filter :300 -negative -percent 98
+# -channel 0 -filter :300 -peaks negative -percent 98
 
 def parse_filter_args(arg):
     [lowstr, highstr] = arg.split(':')
@@ -215,7 +215,7 @@ def score_signal_peak(signal, n, wsize):
         if i1 > n:
             i1 = n
             wsize = i1-i0
-        if ns.negative:
+        if ns.peaks == 'negative':
             s = -signal[i0:i1]
         else:
             s = signal[i0:i1]
@@ -234,7 +234,7 @@ def score_signal_peak(signal, n, wsize):
         if len(y) > len(l):
             y = y[1:]
 
-        if ns.positive or ns.negative:
+        if ns.peaks == 'positive' or ns.peaks == 'negative':
             l = l + y
         else:
             l = l + y*y
@@ -265,7 +265,7 @@ def score_raw_thresholds(signal, n, wsize, thresh):
         if i1 > n:
             i1 = n
             wsize = i1-i0
-        if ns.negative:
+        if ns.peaks == 'negative':
             s = -signal[i0:i1]
         else:
             s = signal[i0:i1]
@@ -295,9 +295,15 @@ def spike_peaks(sig, threshold, smoothing_width=31, sigma=6.0, save_sig=None):
     # zero crossings:
     
     iprint('Threshold: {}'.format(threshold))
+    if ns.peaks == 'negative':
+        iprint("Negating the signal")
+        sig = -sig
+
     if save_sig is not None:
         save_signal(sig, save_sig)
+
     upvec = sig > threshold
+
     iprint( 'Peak vector computed.' )
     sys.stdout.flush()
 
@@ -365,28 +371,44 @@ if ns.threshold is None:
     thresh = find_threshold(signal, nbins, threshp)
 else:
     thresh = ns.threshold
+
 zc = spike_peaks( signal, thresh, score_w, score_s )
 last = len(zc)
 
 if ns.nms is not None:
     iprint("Performing non-maximum suppression with a window of {} samples.".format(ns.nms))
-    i = 0
-    ptime = None
-    pmag = None
-    k = 0
-    while i < last:
-        if zc[i] != 0:
-            if ptime is not None and (i-ptime) < ns.nms:
-                k += 1
-                if signal[i] < pmag:
-                    zc[i] = 0
-                else:
-                    zc[ptime] = 0
-            ptime = i
-            pmag = signal[i]
-        i += 1
-    iprint("{} non-maxima were suppressed.".format(k))
-
+    if ns.avg:
+        iprint("Using average of timestamps for non-maximum suppression.")
+    tot = 0
+    npass = 1
+    more = True
+    # Iterate until there are no more "close" spikes:
+    while more:
+        k = 0        
+        i = 0
+        ptime = None
+        pmag = None
+        more = False
+        while i < last:
+            if zc[i] != 0:
+                if ptime is not None and (i-ptime) < ns.nms:
+                    more = True
+                    k += 1
+                    if ns.avg:
+                        midpoint = (i + ptime) / 2
+                        zc[i] = 0
+                        zc[ptime] = 0
+                        zc[int(midpoint)] = 1
+                    elif signal[i] < pmag:
+                        zc[i] = 0
+                    else:
+                        zc[ptime] = 0
+                ptime = i
+                pmag = signal[i]
+            i += 1
+        iprint("Pass {}: {} non-maxima were suppressed.".format(npass, k))
+        tot += k
+        npass += 1
 i = 0
 iprev = 0
 spikeid = dbobj.max_spike_id()
@@ -409,7 +431,7 @@ with ui.context(ui.colors.OKGREEN) as c:
             # analyze selectively on the channel that gave rise to
             # the spike:
             l = ns.channel
-            if ns.negative:
+            if ns.peaks == 'negative':
                 l = -l
             dbobj.set_spike_channel(spikeid, l)
             iprev = i
