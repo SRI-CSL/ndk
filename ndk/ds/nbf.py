@@ -136,7 +136,7 @@ file contains basic information about the recording."""
         
 # Note that 'data' must be an array of 2 dimensions: nchan x npts
 
-def floats_to_nbf(dirname, data, sample_rate, start, end, events=None, relative=True, source=None):
+def floats_to_nbf(dirname, data, sample_rate, start, end, events=None, relative=True, source=None, permute=None):
     """Converts an array of floats (data) into NBF form in the specified
 dirname, with the sample rate, start and end times given by the
 arguments.  If supplied, 'events' is a list of time,event pairs."""
@@ -171,8 +171,14 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
     raw = np.memmap(rawfile, np.dtype('f4'), 'w+', shape=data_shape)
     # print(raw)
     iprint('Initializing raw file: {}'.format(rawfile))
-    for k in range(nchan):
-        raw[k][:] = data[k][:]
+    if permute is None:
+        rawchan = [k for k in range(nchan)]
+    else:
+        rawchan = permute
+
+    for j in range(nchan):
+        k = rawchan[j]
+        raw[j][:] = data[k][:]
         iprint('Wrote {} data elements'.format(len(data[k])))
     # print(raw)
     del raw

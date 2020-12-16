@@ -15,20 +15,27 @@ import numpy
 
 # Now identical to smr2nbf...
 
-if len(sys.argv) != 3:
-   print('Usage: neo2nbf <from_file> <to_dir>')
+if len(sys.argv) < 3:
+   print('Usage: neo2nbf <from_file> <to_dir> [<permutation>]')
    print('       Converts neo-readable spike2 and Neuralynx field potential data into memory-mappable nbf form.')
+   print('       If -swap is added as the last argument, then channels 2 and 3 are assumed to be cardiac and respiration.')
 else:
    # print('WARNING:  This will generate absolute pathnames that will BREAK some ndk utilities.  FIX ME')
    src = os.path.abspath(sys.argv[1])
    dst = os.path.abspath(sys.argv[2])
+   perm = None
+   if len(sys.argv) > 3:
+       perm = [int(x) for x in sys.argv[3].split(',')]
+       print(perm)
    print('Converting {} to nbf directory {}'.format(src, dst))
+   sys.stdout.flush()
    tuple = ndk.ds.read_raw_data(src)
    print(tuple)
    lfp_vec = tuple[0]
+
    if type(lfp_vec) is list:
        if len(lfp_vec) > 1:
-           print("Don't know how to handle an lfp_vec list with multiple elements.")
+           print("Don't know how to handle an lfp_vec list with multiple ({}) elements.".format( len(lfp_vec) ) )
        else:
            lfp_vec = numpy.transpose(lfp_vec)
    samprate = tuple[1]
@@ -43,5 +50,12 @@ else:
       print('lfp_vec shape: {}'.format(lfp_vec.shape))
    except:
       print('lfp_vec: {}', lfp_vec)
-   floats_to_nbf(dst, numpy.asarray(lfp_vec), samprate, t0, t1, events)
+
+   if perm is not None:
+       chans = perm
+       print("Swapping: {}".format(chans))
+   else:
+       chans = None
+
+   floats_to_nbf(dst, numpy.asarray(lfp_vec), samprate, t0, t1, events, permute=chans)
    
