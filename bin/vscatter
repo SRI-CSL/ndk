@@ -80,7 +80,7 @@ class Viewer():
     def __init__(self, dbobj, width=1024, height=768, window=128000, name=None):
         # self.mode_alist = { 'q': quit , '+': zoom_in , '-': zoom_out }
         # Window dimensions
-        self.ds = dbobj  # hmmm...
+        self.db = dbobj  # hmmm...
         self.xw = width
         self.yw = height
         self.initialized = False
@@ -162,7 +162,7 @@ class Viewer():
         self.initialized = True
 
     def refresh_colors(self, basis=0, channel=ns.channel):
-        self.color = self.ds.get_label_array(basis, channel)
+        self.color = self.db.get_label_array(basis, channel)
 
     def save_frame(self, fname=None):
         w = glutGet(GLUT_WINDOW_WIDTH)
@@ -195,11 +195,11 @@ class Viewer():
 
     def refresh_points(self, coefs, basis=0, relative=True, normalize=ns.normalize):
         if ns.channel is None:
-            next,ts = self.ds.get_coef_array(coefs, basis)
-            #ts = self.ds.get_spike_times(basis)
+            next,ts = self.db.get_coef_array(coefs, basis)
+            #ts = self.db.get_spike_times(basis)
         else:
-            next,ts = self.ds.get_coef_array(coefs, basis, ns.channel)
-            #ts = self.ds.get_spike_times(basis, ns.channel)
+            next,ts = self.db.get_coef_array(coefs, basis, ns.channel)
+            #ts = self.db.get_spike_times(basis, ns.channel)
         print( "Coef array shape = {}".format(next.shape) )
         print( "Length of timestamps = {}".format(len(ts)))
         #if next == None:

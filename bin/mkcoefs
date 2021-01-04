@@ -27,6 +27,8 @@ parser.add_argument('-zeromean', dest='zeromean', action='store_true', help='If 
 #parser.add_argument('-filter',  default="300:4000")
 parser.add_argument('-filter',  default="300:2000")
 parser.add_argument('-basisid', type=int, default=None, help='If provided, only compute coefficients for those spikes with the given basis ID.')
+parser.add_argument('-normalize', dest='normalize', action='store_true', help='If provided, causes all coefficient vectors to be normalized to 1.')
+parser.add_argument('-clear', dest='clear', action='store_true', help='If provided, explicitly clears the coefficient table first.')
 ns = parser.parse_args()
 
 def parse_filter_args(arg):
@@ -76,7 +78,9 @@ if filter:
 #nchannels = len(lfp_vec)
 
 dbobj.make_spikecoefs_table()
-
+if ns.clear:
+    dbobj.clear_spike_coefs()
+    
 bases = {}
 
 def basis_exists(k):
@@ -117,6 +121,10 @@ for (id, ts, bk) in result:
             xp[0:nx] = x[:]
             x = xp
         coefs = ndk.features.waveform_coefs(x.reshape(winsize), seq)
+        if ns.normalize:
+            mag = np.linalg.norm(coefs)
+            if mag > 0.0:
+                coefs /= mag
         dbobj.set_spike_coefs(id, k, coefs)
     if id % 100 == 0:
         print( "\rCoefs: {} ".format(id), end=" ")
