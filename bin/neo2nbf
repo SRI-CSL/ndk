@@ -1,41 +1,55 @@
-#!/usr/bin/env PYTHONOPTIMIZE=1 python
+#!/usr/bin/env python
+
+#####/usr/bin/env PYTHONOPTIMIZE=1 python
 
 # By adding PYTHONOPTIMIZE=1, we suppress assert statements and get
 # around neo.io.PlexonIO's confusion about sampling rates.
 
-from __future__ import print_function
-
-import ndk.ds
-from ndk.ds.nbf import floats_to_nbf
 import os
 import os.path
 import sys
 import numpy
-
+import ndk
+import ndk.ds
+from ndk.ds.nbf import floats_to_nbf
 
 # Now identical to smr2nbf...
 
 if len(sys.argv) < 3:
    print('Usage: neo2nbf <from_file> <to_dir> [<permutation>]')
    print('       Converts neo-readable spike2 and Neuralynx field potential data into memory-mappable nbf form.')
-   print('       If -swap is added as the last argument, then channels 2 and 3 are assumed to be cardiac and respiration.')
+   print('       If provided, the last argument is a comma-separated list of channel numbers indicating their order in the nbf representation.')
 else:
    # print('WARNING:  This will generate absolute pathnames that will BREAK some ndk utilities.  FIX ME')
    src = os.path.abspath(sys.argv[1])
    dst = os.path.abspath(sys.argv[2])
+   print("Converting source {} to nbf destination {}".format(src, dst))
    perm = None
    if len(sys.argv) > 3:
        perm = [int(x) for x in sys.argv[3].split(',')]
-       print(perm)
+       print("Using this channel permutation: ", perm)
    print('Converting {} to nbf directory {}'.format(src, dst))
    sys.stdout.flush()
    tuple = ndk.ds.read_raw_data(src)
-   print(tuple)
+   print('Raw data tuple: ', tuple)
    lfp_vec = tuple[0]
 
    if type(lfp_vec) is list:
        if len(lfp_vec) > 1:
-           print("Don't know how to handle an lfp_vec list with multiple ({}) elements.".format( len(lfp_vec) ) )
+           print("lfp_vec has length > 1 - guessing that channels are grouped.")
+           n = 0
+           npts = 0
+           for i in range(len(lfp_vec)):
+               (npts, nchan) = lfp_vec[i].shape
+               n += nchan
+           print("nchannels = {}, npts = {}".format(n, npts))
+           vec = numpy.zeros((npts, n, 1))
+           k = 0
+           for data in lfp_vec:
+               for i in range(data.shape[1]):
+                   vec[:,k] = data[:,i]
+                   k += 1
+           lfp_vec = numpy.transpose(vec)[0]
        else:
            lfp_vec = numpy.transpose(lfp_vec)
    samprate = tuple[1]
