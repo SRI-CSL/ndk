@@ -191,6 +191,7 @@ def wfdb_to_nbf(filename, to_dir, channel_names=['V1', 'V2', 'V3', 'V4']):
 
     data,fields = wfdb.rdsamp(filename)
 
+    print("Available fields: {}".format(fields))
     # end sample number:
     start = 0
     end = fields['sig_len']

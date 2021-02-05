@@ -1,6 +1,6 @@
 from distutils.core import setup
 setup(name='ndk',
-      version='2.163',
+      version='2.165',
       description='Neurogram Deconvolution Kit',
       author='Chris Connolly',
       author_email='chris@neurome.com',
@@ -49,6 +49,7 @@ setup(name='ndk',
                   'bin/vscatter',
                   'bin/vwave',
                   'bin/ndk2wav',
-                  'bin/neo2nbf'
+                  'bin/neo2nbf',
+                  'bin/wfdb2nbf'
                   ]
 )
