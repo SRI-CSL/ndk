@@ -1,0 +1,57 @@
+#!/usr/bin/env python
+
+#####/usr/bin/env PYTHONOPTIMIZE=1 python
+
+# By adding PYTHONOPTIMIZE=1, we suppress assert statements and get
+# around neo.io.PlexonIO's confusion about sampling rates.
+
+import os
+import os.path
+import sys
+import numpy
+import ndk
+import ndk.ds
+import wfdb
+from wfdb import processing
+import ndk.es.db3 as db
+from ndk.ui import iprint,wprint,eprint
+
+
+# Need to rethink the lead name => channel number concordance.
+
+
+if len(sys.argv) != 3:
+    print("Usage: {} <dbfile> <field>".format(sys.argv[0]))
+else:
+    dbname = sys.argv[1]
+    dbobj = db.open_event_store(dbname)
+    if dbobj==None:
+        eprint( "Data store "+dbname+" does not exist!" )
+        quit()
+
+    samprate, nchannels, filename = dbobj.get_metadata()
+    dsobj = ndk.ds.open(filename, dbname)
+
+    attr = dsobj.md.attributes
+    src = attr['source']
+
+    data,fields = wfdb.rdsamp(src)
+    print(fields['sig_name'])
+    idx = fields['sig_name'].index(sys.argv[2])
+    basisid = 0
+    channel = 0
+    iprint("detecting...")
+    xqrs = processing.XQRS( sig=data[:,idx], fs=fields['fs'] )
+    xqrs.detect()
+
+    spikeid = dbobj.max_spike_id()
+    iprint("Max spike id: {}".format(spikeid))
+    iprint("Inserting {} spikes.".format(len(xqrs.qrs_inds)))
+    for ts in xqrs.qrs_inds:
+        spikeid += 1
+        dbobj.set_spike_time(spikeid, ts)
+        dbobj.set_spike_basisid(spikeid, basisid)
+        dbobj.set_spike_channel(spikeid, channel)
+
+dbobj.close()
+# dsobj.close()

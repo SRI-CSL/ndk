@@ -25,7 +25,7 @@ class nb_metadata:
     # Problem: this initialization will, by default, create a bunch of
     # absolute pathnames, which we don't want.
     """Primary class for handling NDK Binary Format data stores."""
-    def __init__(self, dirname, sample_rate=32000.0, nchannels=1, start=0, end=0, relative=False):
+    def __init__(self, dirname, sample_rate=32000.0, nchannels=1, start=0, end=0, relative=False, attributes={}):
         self.dirname = os.path.abspath(dirname)
         self.name = os.path.basename(self.dirname)
         self.filename = os.path.join(self.dirname, '{}.nbm'.format(self.name))
@@ -42,6 +42,7 @@ class nb_metadata:
         # Always in units of samples:
         self.start = start
         self.end = end
+        self.attributes = attributes
 
     def rawfile(self):
         """Returns the absolute pathname for the raw data file."""
@@ -130,7 +131,8 @@ file contains basic information about the recording."""
                            sample_rate=float(attrs['sample_rate']),
                            nchannels=int(attrs['nchannels']), 
                            start=int(attrs['start']), 
-                           end=int(attrs['end']))
+                           end=int(attrs['end']),
+                           attributes=attrs  )
     return metadata
 
 
