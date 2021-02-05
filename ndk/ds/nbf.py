@@ -1,3 +1,4 @@
+import wfdb
 import numpy as np
 from uritools import urisplit, uriunsplit, urijoin
 import os
@@ -184,7 +185,58 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
     del raw
 
 
+# Other physiological data:
+def wfdb_to_nbf(filename, to_dir, channel_names=['V1', 'V2', 'V3', 'V4']):
+    iprint("Creating nbf from file: {}".format(filename))
 
+    data,fields = wfdb.rdsamp(filename)
+
+    # end sample number:
+    start = 0
+    end = fields['sig_len']
+
+    # I think this is the sample rate:
+    sample_rate = fields['fs']
+
+    # This will barf if the channel_names don't exist in the file, but
+    # collect the indices of the channels that we are interested in
+    # (the Vn leads on the chest, for now):
+    indices = [fields['sig_name'].index(x) for x in channel_names]
+    nchan = len(indices)
+    
+    md = nb_metadata(to_dir, sample_rate, nchan, start, end, True)
+
+    nbf_filename = md.filename
+
+    # If the directory doesn't exist, create it:
+    if not os.path.isdir(to_dir):
+        os.makedirs(to_dir)
+
+    # See floats_to_nbf for hints on Events.  For now, we aren't
+    # looking for events, but this is where we would create an
+    # events.dat file.
+
+    # Save the metadata file:
+    md.save(source=filename)
+
+    # Create the raw data file:
+    rawfile = md.rawfile()
+
+    iprint('Mapping raw file {} using shape {}.'.format(rawfile, ( nchan, end )))
+    raw = np.memmap(rawfile, np.dtype('f4'), 'w+', shape=(nchan, end) )
+    # print(raw)
+    iprint('Initializing raw file: {}'.format(rawfile))
+
+    for j in range(nchan):
+        k = indices[j]
+        raw[j][:] = data[:,k]
+        iprint('Wrote {} data elements'.format(len(data[:,k])))
+    # print(raw)
+    del raw
+
+
+
+    
 def old(rawfile, data, nchan):
     with open(rawfile, 'wb') as f:
         for k in range(nchan):
@@ -216,21 +268,12 @@ def get_version_count(basename):
 
 
 class nbf:
-    """Class that holds information about an NBF object (data and metadata for a neuronal recording)."""
-    def __init__(self, uri, start=0, end=0, sample_rate=32000.0, nchannels=1, version=None):
-        iprint("Creating nbf from URI: {}".format(uri))
-        # This is sloppy.  In this implementation, the URI scheme is
-        # optional.  If the scheme is not present, then the URI is
-        # treated as a filename.
-        if True:
-            self.desc = ndk.ds.parse_uri(uri)
-        else:
-            if isinstance(uri, str) or isinstance(uri, unicode):
-                self.desc = urisplit(uri)
-            else:
-                self.desc = uri
+    """Class that holds information about a wfdb ECG recording (data and metadata for a cardiac recording)."""
+    def __init__(self, filename, start=0, end=0, sample_rate=32000.0, nchannels=1, version=None):
+        
+        iprint("Creating nbf from file: {}".format(filename))
 
-        self.filename = os.path.abspath(uri)
+        self.filename = filename
         self.filtered_data = {}
         iprint("Set up filtered_data list: {}".format(self.filtered_data))
         self.lazy = False

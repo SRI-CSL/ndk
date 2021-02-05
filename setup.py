@@ -1,6 +1,6 @@
 from distutils.core import setup
 setup(name='ndk',
-      version='2.156',
+      version='2.163',
       description='Neurogram Deconvolution Kit',
       author='Chris Connolly',
       author_email='chris@neurome.com',
@@ -8,6 +8,7 @@ setup(name='ndk',
       packages = [ 'ndk', 'ndk.es', 'ndk.ds' ],
       install_requires = [
           'neo',
+          'wfdb',
           'cqlsh',
           'numpy',
           'scipy',
