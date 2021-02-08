@@ -265,6 +265,13 @@ class Viewer():
             self.xscale = 1.0
             self.yscale = 1.0
             self.zscale = 1.0
+        elif key == b't':
+            self.tx = 0.0
+            self.ty = 0.0
+            self.mode = 't'
+            self.xscale = 1.0
+            self.yscale = 1.0
+            self.zscale = 1.0
         elif key == b'*':
             xs = self.pts[0].max() - self.pts[0].mean()
             ys = self.pts[1].max() - self.pts[1].mean()
@@ -279,6 +286,7 @@ class Viewer():
             self.refresh_colors(ns.basis)
         else:
             self.maybe_toggle_color(key)
+            print(key)
         if self.initialized:
             glutPostRedisplay()
 
