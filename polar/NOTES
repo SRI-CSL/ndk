@@ -1,0 +1,8 @@
+Polar device will work with this code on Mac OSX, but you need to use
+a UUID and not a MAC address on MacOS.
+
+Suggest you copy main.py and create a new version that just records
+data to file.
+
+ECG looks decent, but timestamp is unclear.  Is it ticks of 1/130
+second?  I am pretty sure that this is the case.
