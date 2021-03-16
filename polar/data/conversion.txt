@@ -1,0 +1,7 @@
+These only work with wfdb-3.3.0, but they will convert CSV files into
+wfdb files that you can then convert to nbf.
+
+x = wfdb.io.csv2mit('20210308-rest', 130.0, "qV", adc_gain=[1.0])
+>>> x
+>>> x = wfdb.io.csv2mit('20210309-rec85-il10-3min', 130.0, "qV", adc_gain=[1.0])
+>>> 
