@@ -118,8 +118,11 @@ print("Sanity check: get_chunk returns windows of length {}".format(len(wv)))
 wv_array = np.zeros((n, wlen))
 i = 0
 for id in spike_ids:
-    wv_array[i,:] = waveforms[id]
-    i += 1
+    try:
+        wv_array[i,:] = waveforms[id]
+        i += 1
+    except:
+        print("Spike {} shape mismatch.".format(id))
 
 print("Invoking PCA...")
 p = PCA(n_components=ns.ncomp)

@@ -1,34 +1,70 @@
 #!/usr/bin/env python
 
-import asyncio
-import math
 import os
-import signal
 import sys
+import math
 import time
 import wfdb
+import shutil
+import signal
+import asyncio
+import os.path
+import numpy as np
+import nde.gen
+import nde.ssread
+import nde.stim as stim
+import simpleaudio
+import scipy.io.wavfile
+from ndk.ds import wfdb_to_nbf
 
 import pandas as pd
 from bleak import BleakClient
 from bleak.uuids import uuid16_dict
 import matplotlib.pyplot as plt
 import matplotlib
+import simpleaudio as sa
+import sounddevice as sd
 
 matplotlib.use('TkAgg')
 PLOT_IT = False
 
-outf = None
-
 if (len(sys.argv) > 1):
-    outf = open(sys.argv[1], "w")
+    record_name = sys.argv[1]
     print("Sending data to {}".format(sys.argv[1]))
 
 if (len(sys.argv) > 2):
-    nminutes = int(sys.argv[2])
-    nsecs = nminutes * 60
-    print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
-    
-
+    if sys.argv[2].isdigit():
+        nminutes = int(sys.argv[2])
+        nsecs = nminutes * 60
+        print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
+        wave_buffer = None
+    else:
+        ssfile = sys.argv[2]
+        state_machine = nde.ssread.ssread(ssfile)
+        nsecs = state_machine.duration
+        nminutes = nsecs / 60
+        print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
+        seq = nde.gen.gen_sequence(state_machine)
+        wavfile = ssfile[:-3] + ".wav"
+        print("Generating wav file for stimulus in {}".format(wavfile))
+        stream = stim.WAV_out(wavfile)
+        tprev = 0
+        sampnum = 0
+        for i in range(len(seq)):
+            time, amp, wave = seq[i]
+            if i > 0:
+                delta = int ( stream.samprate * (time - tprev) )
+            else:
+                delta = 0
+            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
+            tprev = time
+   
+        stream.put_sample(0.0, finish=True)
+        stream.close()
+        print("...Done.")
+        sr,wave_buffer = scipy.io.wavfile.read(wavfile)
+        wave_buffer = wave_buffer.reshape( ( len(wave_buffer), 1) )
+#        waveobj = sa.WaveObject.from_wave_file(wavfile)
 
 """ Predefined UUID (Universal Unique Identifier) mapping are based on Heart Rate GATT service Protocol that most
 Fitness/Heart Rate device manufacturer follow (Polar H10 in this case) to obtain a specific response input from 
@@ -71,9 +107,43 @@ ECG_WRITE = bytearray([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x0
 ## For Plolar H10  sampling frequency ##
 ECG_SAMPLING_FREQ = 130
 
-
+time_0 = -1
+psec = 0
 ecg_session_data = []
 ecg_session_time = []
+
+
+def save_signal(data, name):
+    p_signal = np.asarray(data, dtype=np.float64)
+    n = len(data)
+    p_signal = p_signal.reshape((n,1))
+    print(p_signal)
+    record_name = name
+    dat_file_name = ['{}.dat'.format(name)]
+    units = ['qV']
+    fmt = ['16']
+    adc_gain = [1]
+    baseline = [0]
+    samps_per_frame = [1]
+
+    rec = wfdb.io.wrsamp(name,
+                         fs=130,
+                         p_signal = p_signal,
+                         units=units,
+                         sig_name=['V1'],
+                         fmt = fmt)
+    return(rec)
+
+def save_and_process(data, name, channels=['V1']):
+    save_signal(data, name)
+    src_hdr = name + '.hea'
+    src_dat = name + '.dat'
+    to_dir = './'+name+'/'
+    print("Saving wfdb record {} to directory {}.".format(name, to_dir))
+    wfdb_to_nbf(name, to_dir, ['V1'])
+    print("Saving state machine events to file {}.".format(to_dir+'events.dat'))
+    state_machine.save_events( to_dir+'events.dat' )
+    shutil.copyfile(ssfile, to_dir)
 
 
 ## Positoning/Pinnning the real-time plot window on the screen
@@ -92,27 +162,36 @@ def move_figure(f, x, y):
 
 ## Keyboard Interrupt Handler
 def keyboardInterrupt_handler(signum, frame):
+    global playback_event   # this sucks
     print("  key board interrupt received...")
     print("----------------Recording stopped------------------------")
-    # Need to add a time here (in minutes):
-    if outf:
-        outf.close()
-        outf = None
+    if playback_event:
+        playback_event.set()
+    else:
+        # This is just a timed collect with no playback, so save and exit:
+        save_and_process(ecg_session_data, record_name)
+        sys.exit(0)
+
 
 
 ## Bit conversion of the Hexadecimal stream
 def data_conv(sender, data):
+    global psec, time_0
     if data[0] == 0x00:
         timestamp = convert_to_unsigned_long(data, 1, 8)
         step = 3
         samples = data[10:]
         offset = 0
-        # print(timestamp)
+        sec = int(timestamp / 1000000000)
+        if time_0 == -1:
+            time_0 = sec
+        if sec > psec:
+            print(sec-time_0, end=' ')
+            sys.stdout.flush()
+            psec = sec
         while offset < len(samples):
             ecg = convert_array_to_signed_int(samples, offset, step)
-            outf.write("{} {}\n".format(timestamp, ecg))
             offset += step
-            # Is this necessary anymore??
             ecg_session_data.extend([ecg])
             ecg_session_time.extend([timestamp])
 
@@ -129,11 +208,74 @@ def convert_to_unsigned_long(data, offset, length):
     )
 
 
+ 
+async def play_buffer(buffer, **kwargs):
+    if buffer is None:
+        return None
+
+    print("Setting up audio stream")
+    loop = asyncio.get_event_loop()
+    event = asyncio.Event()
+    idx = 0
+
+    def callback(outdata, frame_count, time_info, status):
+        nonlocal idx
+        if status:
+            print(status)
+        remainder = len(buffer) - idx
+        if remainder == 0:
+            loop.call_soon_threadsafe(event.set)
+            raise sd.CallbackStop
+        valid_frames = frame_count if remainder >= frame_count else remainder
+        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
+        outdata[valid_frames:] = 0
+        idx += valid_frames
+
+    print("Callback defined.  Opening audio stream (type={})".format(buffer.dtype))
+    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
+                             channels=1, blocksize=8192, **kwargs)
+    print("Stream opened: ", stream)
+    
+    # We will want to await this to wait for playback to reach the end of the buffer:
+    return event, stream
+# We want this to run concurrently
+#    with stream:
+#        await event.wait()
+
+def play_buffer2(buffer, **kwargs):
+    if buffer is None:
+        return None
+
+    print("Setting up audio stream")
+    idx = 0
+
+    def callback(outdata, frame_count, time_info, status):
+        nonlocal idx
+        if status:
+            print(status)
+        remainder = len(buffer) - idx
+        if remainder == 0:
+            raise sd.CallbackStop()
+        valid_frames = frame_count if remainder >= frame_count else remainder
+        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
+        outdata[valid_frames:] = 0
+        idx += valid_frames
+
+    print("Callback defined.  Opening audio stream")
+    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
+                             channels=1, blocksize=8192, **kwargs)
+    print("Stream opened: ", stream)
+    return stream
+
+
+
 ## Aynchronous task to start the data stream for ECG ##
 async def run(client, debug=False):
-
+    global playback_event
     ## Writing chracterstic description to control point for request of UUID (defined above) ##
 
+    # Should this look anything like the ECG stream?
+    
     await client.is_connected()
     print("---------Device connected--------------")
 
@@ -155,42 +297,30 @@ async def run(client, debug=False):
 
     print("Collecting ECG data...")
 
-    ## Plot configurations
-    if PLOT_IT:
-        plt.style.use("ggplot")
-        fig = plt.figure(figsize=(15, 6))
-        move_figure(fig, 2300, 0)
-        ax = fig.add_subplot()
-        fig.show()
-
-        plt.title(
-            "Live ECG Stream on Polar-H10", fontsize=15,
-        )
-        plt.ylabel("Voltage in millivolts", fontsize=15)
-        plt.xlabel(
-            "\nData source: www.pareeknikhil.medium.com | " "Author: @pareeknikhil",
-            fontsize=10,
-        )
+    print("Starting stimulation playback")
+    playback_event, playback_stream = await play_buffer(wave_buffer)
 
     n = ECG_SAMPLING_FREQ
 
-    #    while True:
-
-    ## Collecting ECG data for 1 second
-    await asyncio.sleep(nsecs)
-    if PLOT_IT:
-        plt.autoscale(enable=True, axis="y", tight=True)
-        ax.plot(ecg_session_data, color="r")
-        fig.canvas.draw()
-        ax.set_xlim(left=n - 130, right=n)
-        n = n + 130
-
-        plt.show()
+    ## Collecting ECG data for nsecs seconds
+    if playback_event is None:
+        await asyncio.sleep(nsecs)
+        print("...")
+        print("We ran for {} seconds.  Stopping collection.".format(nsecs))
+    else:
+        # End of playback == end of experiment:
+        with playback_stream:
+            await playback_event.wait()
+        playback_stream.close()
+        print("...")
+        print("Reached the end of the stimulus program.  Stopping collection.")
 
     ## Stop the stream once data is collected
     await client.stop_notify(PMD_DATA)
     print("Stopping ECG data...")
     print("[CLOSED] application closed.")
+
+    save_and_process(ecg_session_data, record_name)
 
     sys.exit(0)
 
@@ -201,6 +331,7 @@ async def main():
             signal.signal(signal.SIGINT, keyboardInterrupt_handler)
             tasks = [
                 asyncio.ensure_future(run(client, True)),
+                
             ]
 
             await asyncio.gather(*tasks)

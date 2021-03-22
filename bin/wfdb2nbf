@@ -9,6 +9,8 @@ import os
 import os.path
 import sys
 import numpy
+import shutil
+
 import ndk
 import ndk.ds
 from ndk.ds.nbf import wfdb_to_nbf
@@ -19,16 +21,35 @@ if len(sys.argv) < 3:
    print('Usage: wfdb2nbf <from_file> <to_dir> [fields]')
    print('       Converts wfdb-readable ECG data into memory-mappable nbf form.')
    print('       If provided, the fields argument is a comma-separated list of fields to be used.')
+   print('       Will also copy source data (wfdb format) into the nbf directory for safekeeping.')
 else:
    # print('WARNING:  This will generate absolute pathnames that will BREAK some ndk utilities.  FIX ME')
    src = os.path.abspath(sys.argv[1])
    dst = os.path.abspath(sys.argv[2])
    print('Converting {} to nbf directory {}'.format(src, dst))
    sys.stdout.flush()
+
+   if not os.path.isdir(dst):
+      os.makedirs(dst)
+
+   src_hdr = os.path.split(src)[1]+'.hea'
+   src_dat = os.path.split(src)[1]+'.dat'
+   
+   newsrc = os.path.join( dst, os.path.split(src)[1] )
+
+   shutil.copyfile( src+'.hea', newsrc+'.hea')
+   shutil.copyfile( src+'.dat', newsrc+'.dat')
+
+   print("Copied wfdb sources into {}".format(newsrc))
+
+   with open( os.path.join(dst, 'events.dat'), 'w') as f:
+      f.write("78000:stim\n")
+   print("Wrote a default 600-second event mark in 'events.dat'.  Change if you need to.")
+
    if len(sys.argv) < 4:
-       wfdb_to_nbf(src, dst)
+      wfdb_to_nbf(newsrc, dst, ['V1'])
    else:
-       fnames = sys.argv[3].split(',')
-       wfdb_to_nbf(src, dst, fnames)
+      fnames = sys.argv[3].split(',')
+      wfdb_to_nbf(newsrc, dst, fnames)
 
        

@@ -1,6 +1,6 @@
 from distutils.core import setup
 setup(name='ndk',
-      version='2.166',
+      version='2.167',
       description='Neurogram Deconvolution Kit',
       author='Chris Connolly',
       author_email='chris@neurome.com',
