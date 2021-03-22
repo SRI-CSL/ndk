@@ -20,6 +20,13 @@ from OpenGL.GLUT import *
 from OpenGL.GLU import *
 from PIL import Image
 
+# TO DO: Movie playback still needs help.  Suggest calling show_movie
+# in a way that plays the whole dataset using "reasonable" values of
+# step and window.  Compute these based on dataset duration, event
+# frequency, and sampling rate.
+
+
+
 # Think about adding -start and -end args here - want to visualize a
 # subset of spikes in time:
 
@@ -175,7 +182,12 @@ class Viewer():
         image = Image.frombytes("RGBA", (w,h), data)
         image.save(fname+'.png', 'png')
 
-    def show_movie(self, save_frames=False, step=32000, window=200000):
+#
+# TO DO: Be smart about step and window.  Call this with parameters
+# that visualize a "natural" playback of the entire dataset:
+#
+
+    def show_movie(self, save_frames=False, step=100, window=1300):
         global ps
         ps = 3
         self.window = window
