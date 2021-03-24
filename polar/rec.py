@@ -141,9 +141,16 @@ def save_and_process(data, name, channels=['V1']):
     to_dir = './'+name+'/'
     print("Saving wfdb record {} to directory {}.".format(name, to_dir))
     wfdb_to_nbf(name, to_dir, ['V1'])
+    os.system("cp {} {}".format(ssfile, to_dir))
+    # shutil.copyfile(ssfile, to_dir)
+    print("Saving a copy of wfdb header file {} to {}".format(src_hdr, to_dir))
+    os.system("cp {} {}".format(src_hdr, to_dir))
+    # shutil.copyfile(src_hdr, to_dir)
+    print("Saving a copy of wfdb data file {} to {}".format(src_dat, to_dir))
+    os.system("cp {} {}".format(src_dat, to_dir))
+    # shutil.copyfile(src_dat, to_dir)
     print("Saving state machine events to file {}.".format(to_dir+'events.dat'))
     state_machine.save_events( to_dir+'events.dat' )
-    shutil.copyfile(ssfile, to_dir)
 
 
 ## Positoning/Pinnning the real-time plot window on the screen
@@ -170,7 +177,8 @@ def keyboardInterrupt_handler(signum, frame):
     else:
         # This is just a timed collect with no playback, so save and exit:
         save_and_process(ecg_session_data, record_name)
-        sys.exit(0)
+        # sys.exit(0)
+        quit()
 
 
 
@@ -322,7 +330,8 @@ async def run(client, debug=False):
 
     save_and_process(ecg_session_data, record_name)
 
-    sys.exit(0)
+    quit()
+    # sys.exit(0)
 
 
 async def main():

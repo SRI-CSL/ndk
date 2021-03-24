@@ -39,10 +39,12 @@ parser.add_argument('-coefs', default='0:2,1:2,2:2', help='Coefficients to use f
 parser.add_argument('-highlight', default=None, help='Time interval to highlight  by changing alpha.')
 parser.add_argument('-alpha', type=float, default=0.4, help='Alpha channel value for cluster translucency.')
 parser.add_argument('-normalize', dest='normalize', action='store_true', help='If provided, causes all coefficient vectors to be normalized to 1.')
+parser.add_argument('-centroids', dest='centroids', action='store_true', help='If provided, plot centroids as big points.')
 ns = parser.parse_args()
 dbname = ns.files[0]
 basis = ns.basis
 ps = ns.pointsize
+plot_centroids = ns.centroids
 
 def maybe_mkdir(dir):
     try:
@@ -373,6 +375,7 @@ class Viewer():
         glColor3f(1,0,0)
         l = self.pts
         (nc, npts) = l.shape
+        centroids = {}
         for k in range(npts):
             if self.t0 <= self.ts[k] and self.ts[k] < self.t1:
                 alpha = self.alpha
@@ -387,6 +390,27 @@ class Viewer():
                     ci = c % 7
                     glColor4d(self.colortab[ci][0], self.colortab[ci][1], self.colortab[ci][2], alpha)
                     glVertex3f(l[0][k], l[1][k], l[2][k])
+                if plot_centroids:
+                    try:
+                        pt = centroids[c]
+                    except:
+                        pt = np.zeros(4)
+                    pt[0] += l[0][k]
+                    pt[1] += l[1][k]
+                    pt[2] += l[2][k]
+                    pt[3] += 1
+                    centroids[c] = pt
+
+        if plot_centroids and len(self.color) > 0:
+            glEnd()
+            glPointSize(ps * 3)
+            glBegin(GL_POINTS)
+            for key in centroids:
+                v = centroids[key]
+                ci = key % 7
+                glColor4d(self.colortab[ci][0], self.colortab[ci][1], self.colortab[ci][2], 1.0)
+                glVertex3f(v[0]/v[3], v[1]/v[3], v[2]/v[3])
+            
         glEnd()
         glFlush()
 

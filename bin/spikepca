@@ -22,14 +22,17 @@ from sklearn.decomposition import PCA
 
 parser = argparse.ArgumentParser(description='PCA over raw data waveforms.')
 parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
-parser.add_argument('-channel', type=int, default=2, help='Channel to use')
-parser.add_argument('-basis', type=int, default=None, help='Basis ID to start (only process spikes that have this basis)')
+parser.add_argument('-channel', type=int, default=0, help='Channel to use (assume cardiac)')
+parser.add_argument('-basis', type=int, default=None, help='Basis ID to start - None (default) means all spikes are rebased.')
 parser.add_argument('-filter',  default=None)
 parser.add_argument('-ncomp', type=int, default=5, help='Number of PCA components to use')
-parser.add_argument('-window', type=int, default=100, help='Width of sample window.')
+parser.add_argument('-window', type=int, default=120, help='Width of sample window.')
 parser.add_argument('-pad', type=int, default=0, help='Padding to apply to the window on either side.  Widens the component.')
 ns = parser.parse_args()
 
+# If -basis is provided, only those spikes that belong to that basis
+# will be used for PCA and moved to the new PCA basis.  Otherwise, all
+# spikes will be transformed into the PCA basis.
 
 def parse_filter_args(arg):
     [lowstr, highstr] = arg.split(':')
@@ -72,6 +75,7 @@ dsobj = ndk.ds.open(recfile, dbname)
 
 if filtering:
     dsobj.filter_data(lo, hi, 6)
+
 if ns.basis is None:
     esobj.execute('select spiketimes.spikeID,spiketimes.samplenum from spiketimes join spikechannels where spikechannels.spikeID=spiketimes.spikeID and  spikechannels.channel = {};'.format(ns.channel))
 else:
@@ -84,17 +88,20 @@ print("Select query returned {} results.".format(len(result)))
 spiketimes = {}
 waveforms = {}
 
-if ns.window:
-    wlen = ns.window
-else:
+if ns.basis:
+    # not the default, but if user supplies a basis, then use it to
+    # define the window:
     seq = esobj.get_basis(ns.basis)
     wlen = len(seq[0])
+else:
+    wlen = ns.window
+
 
 wh = ns.pad + wlen / 2
 wlen += 2*ns.pad
 
 print("Feature size = {} samples".format(wlen))
-#
+
 # Collect waveforms:
 counter = 0
 dc = len(result) / 100;
