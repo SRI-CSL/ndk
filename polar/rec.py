@@ -46,22 +46,25 @@ if (len(sys.argv) > 2):
         print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
         seq = nde.gen.gen_sequence(state_machine)
         wavfile = ssfile[:-3] + ".wav"
-        print("Generating wav file for stimulus in {}".format(wavfile))
-        stream = stim.WAV_out(wavfile)
-        tprev = 0
-        sampnum = 0
-        for i in range(len(seq)):
-            time, amp, wave = seq[i]
-            if i > 0:
-                delta = int ( stream.samprate * (time - tprev) )
-            else:
-                delta = 0
-            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
-            tprev = time
+        if os.path.exists(wavfile):
+            print("Re-using wav file for stimulus: {}".format(wavfile))
+        else:
+            print("Generating wav file for stimulus in {}".format(wavfile))
+            stream = stim.WAV_out(wavfile)
+            tprev = 0
+            sampnum = 0
+            for i in range(len(seq)):
+                time, amp, wave = seq[i]
+                if i > 0:
+                    delta = int ( stream.samprate * (time - tprev) )
+                else:
+                    delta = 0
+                sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
+                tprev = time
    
-        stream.put_sample(0.0, finish=True)
-        stream.close()
-        print("...Done.")
+            stream.put_sample(0.0, finish=True)
+            stream.close()
+            print("...Done.")
         sr,wave_buffer = scipy.io.wavfile.read(wavfile)
         wave_buffer = wave_buffer.reshape( ( len(wave_buffer), 1) )
 #        waveobj = sa.WaveObject.from_wave_file(wavfile)
