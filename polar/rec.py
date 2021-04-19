@@ -115,6 +115,9 @@ psec = 0
 ecg_session_data = []
 ecg_session_time = []
 
+sync = asyncio.Event()
+sync.clear()
+first = True
 
 def save_signal(data, name):
     p_signal = np.asarray(data, dtype=np.float64)
@@ -187,7 +190,8 @@ def keyboardInterrupt_handler(signum, frame):
 
 ## Bit conversion of the Hexadecimal stream
 def data_conv(sender, data):
-    global psec, time_0
+    global psec, time_0, sync, first
+    sync.set()
     if data[0] == 0x00:
         timestamp = convert_to_unsigned_long(data, 1, 8)
         step = 3
@@ -221,6 +225,7 @@ def convert_to_unsigned_long(data, offset, length):
 
  
 async def play_buffer(buffer, **kwargs):
+    global sync, first
     if buffer is None:
         return None
 
@@ -242,9 +247,13 @@ async def play_buffer(buffer, **kwargs):
         outdata[valid_frames:] = 0
         idx += valid_frames
 
+    #await asyncio.sleep(3)
     print("Callback defined.  Opening audio stream (type={})".format(buffer.dtype))
     stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
                              channels=1, blocksize=8192, **kwargs)
+    #if first:
+    #    await sync.wait()
+    #    first = False
     print("Stream opened: ", stream)
     
     # We will want to await this to wait for playback to reach the end of the buffer:
@@ -303,13 +312,16 @@ async def run(client, debug=False):
 
     await client.write_gatt_char(PMD_CONTROL, ECG_WRITE)
 
+    #print("Starting stimulation playback")
+    #playback_event, playback_stream = await play_buffer(wave_buffer)
+
     ## ECG stream started
     await client.start_notify(PMD_DATA, data_conv)
 
-    print("Collecting ECG data...")
-
     print("Starting stimulation playback")
     playback_event, playback_stream = await play_buffer(wave_buffer)
+
+    print("Collecting ECG data...")
 
     n = ECG_SAMPLING_FREQ
 

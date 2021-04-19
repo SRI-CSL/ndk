@@ -413,6 +413,18 @@ if ns.nms is not None:
         iprint("Pass {}: {} non-maxima were suppressed.".format(npass, k))
         tot += k
         npass += 1
+
+def search_for_max(timestamp, search_radius):
+    max = None
+    maxk = None
+    for k in range(timestamp-search_radius, timestamp+search_radius):
+        if not max or signal[k] > max:
+            max = signal[k]
+            maxk = k
+    return maxk
+            
+            
+
 i = 0
 iprev = 0
 spikeid = dbobj.max_spike_id()
@@ -427,6 +439,9 @@ with ui.context(ui.colors.OKGREEN) as c:
         if (spikep):
             # The timestamp is in units of SAMPLES.
             ts = t0 + i + shift
+
+            if ns.search > 0:
+                ts = search_for_max(ts, ns.search)
 
             spikeid += 1
             dbobj.set_spike_time(spikeid, ts)
