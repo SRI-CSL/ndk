@@ -50,7 +50,7 @@ if (len(sys.argv) > 2):
             print("Re-using wav file for stimulus: {}".format(wavfile))
         else:
             print("Generating wav file for stimulus in {}".format(wavfile))
-            stream = stim.WAV_out(wavfile)
+            stream = stim.WAV_out(wavfile, samprate=48100)
             tprev = 0
             sampnum = 0
             for i in range(len(seq)):
