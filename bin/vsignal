@@ -172,6 +172,7 @@ class Cursor(object):
         self.x1 = self.t0 + self.npts
         self.press = None
         self.prev_line = None
+        self.prev_line_ts = None
         self.es = es
         self.ds = ds
         self.chan = channel
@@ -390,6 +391,8 @@ class Cursor(object):
                     x_data[i] = event.xdata
                 self.prev_line.set_xdata(x_data)
                 fig.canvas.draw_idle()
+                spike_id = self.tsdict[self.prev_line]
+                self.prev_line_ts = int(x_data[0])
         else:
             # The mouse allows us to slide the right-hand side of the
             # interval.  We should allow the user to change these later,
@@ -427,7 +430,13 @@ class Cursor(object):
     def mouse_release(self, event):
         if event.button == 1:
             if event.key ==  "control" and self.prev_line is not None:
+                spike_id = self.tsdict[self.prev_line]
                 print("Moving line {} to {}.".format( self.prev_line, event.xdata))
+                if self.prev_line_ts is not None:
+                    self.es.set_spike_time(spike_id, self.prev_line_ts)
+                    self.es.commit()
+                    print("Moving spike {} to {}.".format( spike_id, self.prev_line_ts) )
+                self.prev_line_ts = None
             self.stop_drag(event)
 
     def key_press(self, event):
@@ -482,7 +491,16 @@ class Cursor(object):
         elif event.key == ' ':
             # Move to the next anomalous interval:
             self.refresh( beats.next() - (self.npts/2) )
-
+            self.prev_line = None
+        elif event.key == 'delete':
+            print("Delete {}".format(self.prev_line))
+            if self.prev_line:
+                spike_id = self.tsdict[self.prev_line]
+                self.prev_line.set_color('black')
+                print("Deleting spike {} from the db".format(spike_id))
+                self.es.delete_spike(spike_id)
+                fig.canvas.draw_idle()
+                self.prev_line = None
 
     def next(self, event, incr=0):
         if incr == 0:
@@ -514,6 +532,7 @@ class Cursor(object):
         line = event.artist
         print(line)
         spike_id = self.tsdict[line]
+        print("Selected spike ID {}".format(spike_id))
         line.set_color('yellow')
         self.prev_line = line
         fig.canvas.draw_idle()

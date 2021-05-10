@@ -976,7 +976,13 @@ file, populate the event store with relevant information from
         
         
 
-
+    def delete_spike(self, spike_id):
+        self.execute("delete from spiketimes where spikeID = {}".format(spike_id))
+        self.execute("delete from spikecoefs where spikeID = {}".format(spike_id))
+        self.execute("delete from spikelabels where spikeID = {}".format(spike_id))
+        self.execute("delete from spikebasis where spikeID = {}".format(spike_id))
+        self.execute("delete from spikechannels where spikeID = {}".format(spike_id))
+        self.commit()
 
 
 
