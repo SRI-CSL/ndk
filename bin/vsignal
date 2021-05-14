@@ -356,6 +356,26 @@ class Cursor(object):
                 i += 1
 
         plt.draw()
+
+    def fix_timestamp(self, spike_id, ts):
+        #print("Fixing spike {} timestamp at {}".format(spike_id, ts))
+        signal = self.ds.get_chunk(self.chan, ts - 5, ts + 5)
+        k = 0
+        m = signal[0]
+        mi = -1
+        for k in range(len(signal)):
+            if signal[k] > m:
+                mi = k
+                m = signal[k]
+        new_ts = ts + mi - 5
+        if mi != -1 and new_ts != ts:
+            print("New timestamp {} for spike {} => {}".format(spike_id, ts, new_ts))
+            self.es.execute("replace into spiketimes values ({}, {})".format(spike_id, new_ts) )
+            return 1
+        return 0
+        
+
+
         # if self.raw:
         #    ndk.features.get_window(lfp_vec[self.chan], self.t0, self.winsize)
 
@@ -492,7 +512,25 @@ class Cursor(object):
             # Move to the next anomalous interval:
             self.refresh( beats.next() - (self.npts/2) )
             self.prev_line = None
-        elif event.key == 'delete':
+        elif event.key == 't':
+            print("Fix {}".format(self.prev_line))
+            if self.prev_line:
+                spike_id = self.tsdict[self.prev_line]
+                x_data = self.prev_line.get_xdata()
+                ts = int(x_data[0])
+                self.fix_timestamp(spike_id, ts)
+                fig.canvas.draw_idle()
+        elif event.key == 'T':
+            print("Fixing all spikes.")
+            self.es.execute("select * from spiketimes")
+            results = self.es.fetchall()
+            nchanged = 0
+            for r in results:
+                spike_id = r[0]
+                spike_ts = r[1]
+                nchanged += self.fix_timestamp(spike_id, spike_ts)
+            print("{} beats were adjusted.".format(nchanged))
+        elif event.key == 'delete' or event.key == 'backspace':
             print("Delete {}".format(self.prev_line))
             if self.prev_line:
                 spike_id = self.tsdict[self.prev_line]
@@ -501,6 +539,8 @@ class Cursor(object):
                 self.es.delete_spike(spike_id)
                 fig.canvas.draw_idle()
                 self.prev_line = None
+        else:
+            print("Event key: ", event.key)
 
     def next(self, event, incr=0):
         if incr == 0:
@@ -535,6 +575,8 @@ class Cursor(object):
         print("Selected spike ID {}".format(spike_id))
         line.set_color('yellow')
         self.prev_line = line
+        x_data = self.prev_line.get_xdata()
+        self.prev_line_ts = int(x_data[0])
         fig.canvas.draw_idle()
 
 # vcoefs plots waveforms and reconstructed waveforms, to visualize the

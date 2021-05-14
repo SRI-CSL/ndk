@@ -157,10 +157,10 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
 
     if events:
         eventfile = os.path.join(dirname, 'events.dat')
-        print("Events found:")
+        iprint("Events found:")
         with open(eventfile, 'w') as f:
             for (ts, label) in events:
-                print("{}: {}".format(label, ts))
+                iprint("{}: {}".format(label, ts))
                 if label[-1] != '\n':
                     f.write('{}:{}\n'.format(ts, label))
                 else:
@@ -301,12 +301,12 @@ class nbf:
         # If there are any events, generate the list:
         self.events = []
         if os.path.exists(efile):
-            print("Events found:")
+            print("# Events found:")
             with open(efile, 'r') as f:
                 for line in f:
                     x = line.split(':')
                     elabel = x[1].split('\n')[0]
-                    print("{}: {}".format(elabel, x[0]))
+                    print("# {}: {}".format(elabel, x[0]))
                     self.events.append( (int(x[0]), elabel) )
                 self.events.sort(key=getfirst)
         # How?  Each channel is a "strip" of consecutive samples at a rate of
