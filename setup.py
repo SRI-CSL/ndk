@@ -1,6 +1,6 @@
 from distutils.core import setup
 setup(name='ndk',
-      version='2.174',
+      version='2.175',
       description='Neurogram Deconvolution Kit',
       author='Chris Connolly',
       author_email='chris@neurome.com',
@@ -21,7 +21,11 @@ setup(name='ndk',
           'uritools',
           'pyOpenGL',
           'quantities',
-          'matplotlib'
+          'matplotlib',
+          'pyaudio',
+          'simpleaudio',
+          'sounddevice',
+          'bleak'
       ],
       scripts = [ 'bin/audio',
                   'bin/addbasis',

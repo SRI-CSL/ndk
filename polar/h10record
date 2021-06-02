@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+#    /usr/local/bin/python3
 import os
 import sys
 import math
@@ -13,20 +13,47 @@ import numpy as np
 import nde.gen
 import nde.ssread
 import nde.stim as stim
-import simpleaudio
 import scipy.io.wavfile
 from ndk.ds import wfdb_to_nbf
 
 import pandas as pd
 from bleak import BleakClient
 from bleak.uuids import uuid16_dict
-import matplotlib.pyplot as plt
-import matplotlib
-import simpleaudio as sa
 import sounddevice as sd
 
-matplotlib.use('TkAgg')
-PLOT_IT = False
+
+def ss_to_wav(ssfile):
+    state_machine = nde.ssread.ssread(ssfile)
+    nsecs = state_machine.duration
+    nminutes = nsecs / 60
+    print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
+    seq = nde.gen.gen_sequence(state_machine)
+    wavfile = ssfile[:-3] + ".wav"
+    if os.path.exists(wavfile):
+        print("Re-using wav file for stimulus: {}".format(wavfile))
+    else:
+        print("Generating wav file for stimulus in {}".format(wavfile))
+        stream = stim.WAV_out(wavfile, samprate=48100)
+        tprev = 0
+        sampnum = 0
+        for i in range(len(seq)):
+            time, amp, wave = seq[i]
+            if i > 0:
+                delta = int ( stream.samprate * (time - tprev) )
+            else:
+                delta = 0
+            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
+            tprev = time
+   
+        stream.put_sample(0.0, finish=True)
+        stream.close()
+        print("...Done.")
+    return wavfile
+
+
+if (len(sys.argv) == 1):
+    print("Usage: h10record <collection_dir> [<ss_file>]")
+    exit()
 
 if (len(sys.argv) > 1):
     record_name = sys.argv[1]
@@ -40,34 +67,18 @@ if (len(sys.argv) > 2):
         wave_buffer = None
     else:
         ssfile = sys.argv[2]
-        state_machine = nde.ssread.ssread(ssfile)
-        nsecs = state_machine.duration
-        nminutes = nsecs / 60
-        print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
-        seq = nde.gen.gen_sequence(state_machine)
-        wavfile = ssfile[:-3] + ".wav"
-        if os.path.exists(wavfile):
-            print("Re-using wav file for stimulus: {}".format(wavfile))
+        info = ssfile.split('.')
+        print(info[-1])
+        if info[-1] == 'ss':
+            wavfile = ss_to_wav(ssfile)
         else:
-            print("Generating wav file for stimulus in {}".format(wavfile))
-            stream = stim.WAV_out(wavfile, samprate=48100)
-            tprev = 0
-            sampnum = 0
-            for i in range(len(seq)):
-                time, amp, wave = seq[i]
-                if i > 0:
-                    delta = int ( stream.samprate * (time - tprev) )
-                else:
-                    delta = 0
-                sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
-                tprev = time
-   
-            stream.put_sample(0.0, finish=True)
-            stream.close()
-            print("...Done.")
+            wavfile = ssfile
+            print("Using precomputed WAV file: ", wavfile)
         sr,wave_buffer = scipy.io.wavfile.read(wavfile)
+        print(wave_buffer.shape)
+        # What if the wav file has 2 channels?
         wave_buffer = wave_buffer.reshape( ( len(wave_buffer), 1) )
-#        waveobj = sa.WaveObject.from_wave_file(wavfile)
+
 
 """ Predefined UUID (Universal Unique Identifier) mapping are based on Heart Rate GATT service Protocol that most
 Fitness/Heart Rate device manufacturer follow (Polar H10 in this case) to obtain a specific response input from 
@@ -77,6 +88,11 @@ uuid16_dict = {v: k for k, v in uuid16_dict.items()}
 
 ## This is the device MAC ID, please update with your device ID
 # ADDRESS = "D4:52:48:88:EA:04"
+#
+#
+# Not sure, but it looks as if these addresses are dependent on both
+# the device (H10) and the host (CIC CSL Laptop)!
+#
 ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
 
 ## UUID for model number ##
@@ -160,17 +176,17 @@ def save_and_process(data, name, channels=['V1']):
 
 
 ## Positoning/Pinnning the real-time plot window on the screen
-def move_figure(f, x, y):
-    """Move figure's upper left corner to pixel (x, y)"""
-    backend = matplotlib.get_backend()
-    if backend == "TkAgg":
-        f.canvas.manager.window.wm_geometry("+%d+%d" % (x, y))
-    elif backend == "WXAgg":
-        f.canvas.manager.window.SetPosition((x, y))
-    else:
-        # This works for QT and GTK
-        # You can also use window.setGeometry
-        f.canvas.manager.window.move(x, y)
+#def move_figure(f, x, y):
+#    """Move figure's upper left corner to pixel (x, y)"""
+#    backend = matplotlib.get_backend()
+#    if backend == "TkAgg":
+#        f.canvas.manager.window.wm_geometry("+%d+%d" % (x, y))
+#    elif backend == "WXAgg":
+#        f.canvas.manager.window.SetPosition((x, y))
+#    else:
+#        # This works for QT and GTK
+#        # You can also use window.setGeometry
+#        f.canvas.manager.window.move(x, y)
 
 
 ## Keyboard Interrupt Handler
@@ -226,13 +242,16 @@ def convert_to_unsigned_long(data, offset, length):
  
 async def play_buffer(buffer, **kwargs):
     global sync, first
+
+    loop = asyncio.get_event_loop()
+    idx = 0
+    event = asyncio.Event()
+
     if buffer is None:
-        return None
+        print("No buffer, will perform a timed recording.")
+        return event, None
 
     print("Setting up audio stream")
-    loop = asyncio.get_event_loop()
-    event = asyncio.Event()
-    idx = 0
 
     def callback(outdata, frame_count, time_info, status):
         nonlocal idx
@@ -312,13 +331,9 @@ async def run(client, debug=False):
 
     await client.write_gatt_char(PMD_CONTROL, ECG_WRITE)
 
-    #print("Starting stimulation playback")
-    #playback_event, playback_stream = await play_buffer(wave_buffer)
-
     ## ECG stream started
     await client.start_notify(PMD_DATA, data_conv)
 
-    print("Starting stimulation playback")
     playback_event, playback_stream = await play_buffer(wave_buffer)
 
     print("Collecting ECG data...")
@@ -326,7 +341,8 @@ async def run(client, debug=False):
     n = ECG_SAMPLING_FREQ
 
     ## Collecting ECG data for nsecs seconds
-    if playback_event is None:
+    if playback_stream is None:
+        print("Performing timed collection (no audio stream)...")
         await asyncio.sleep(nsecs)
         print("...")
         print("We ran for {} seconds.  Stopping collection.".format(nsecs))
