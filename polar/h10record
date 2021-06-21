@@ -21,8 +21,10 @@ from bleak import BleakClient
 from bleak.uuids import uuid16_dict
 import sounddevice as sd
 
+state_machine = None
 
 def ss_to_wav(ssfile):
+    global state_machine
     state_machine = nde.ssread.ssread(ssfile)
     nsecs = state_machine.duration
     nminutes = nsecs / 60
@@ -157,6 +159,7 @@ def save_signal(data, name):
     return(rec)
 
 def save_and_process(data, name, channels=['V1']):
+    global state_machine
     save_signal(data, name)
     src_hdr = name + '.hea'
     src_dat = name + '.dat'
