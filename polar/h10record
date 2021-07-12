@@ -205,11 +205,12 @@ def keyboardInterrupt_handler(signum, frame):
         # sys.exit(0)
         quit()
 
-
+discard = -1 # 130 * 60
+npts = 0
 
 ## Bit conversion of the Hexadecimal stream
 def data_conv(sender, data):
-    global psec, time_0, sync, first
+    global psec, time_0, sync, first, discard, npts
     sync.set()
     if data[0] == 0x00:
         timestamp = convert_to_unsigned_long(data, 1, 8)
@@ -226,8 +227,13 @@ def data_conv(sender, data):
         while offset < len(samples):
             ecg = convert_array_to_signed_int(samples, offset, step)
             offset += step
-            ecg_session_data.extend([ecg])
-            ecg_session_time.extend([timestamp])
+            npts += len(samples)
+            if npts < discard:
+                psec = sec
+                print('dropping')
+            else:
+                ecg_session_data.extend([ecg])
+                ecg_session_time.extend([timestamp])
 
 
 def convert_array_to_signed_int(data, offset, length):

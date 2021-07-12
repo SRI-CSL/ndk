@@ -32,12 +32,17 @@ parser.add_argument('-ts', dest='plot_ts', action='store_true', help='If provide
 parser.add_argument('-cooked', dest='cooked', action='store_true', help='If provided, plots the db-generated waveforms.')
 parser.add_argument('-filter',  default="300:2000")
 parser.add_argument('-resp', dest='resp', action='store_true', default=False, help='If provided, use low-pass filtering to detect respiration events.')
+parser.add_argument('-cardiac', dest='cardiac', action='store_true', help='If provided, will use "-raw -ts -filter none" as args.')
 ns = parser.parse_args()
 
 lo = None
 hi = None
 filtering = False
 
+if ns.cardiac:
+    ns.raw = True
+    ns.plot_ts = True
+    ns.filter = "none"
 
 class Beats:
     def __init__(self, event_store, channel=None):
@@ -88,6 +93,11 @@ class Beats:
         self.index += 1
         return time
 
+    def prev(self):
+        diff, time = self.intervals[self.index]
+        self.index -= 1
+        return time
+    
 
 
 def parse_filter_args(arg):
@@ -357,9 +367,9 @@ class Cursor(object):
 
         plt.draw()
 
-    def fix_timestamp(self, spike_id, ts):
+    def fix_timestamp(self, spike_id, ts, radius=10):
         #print("Fixing spike {} timestamp at {}".format(spike_id, ts))
-        signal = self.ds.get_chunk(self.chan, ts - 5, ts + 5)
+        signal = self.ds.get_chunk(self.chan, ts - radius, ts + radius)
         k = 0
         m = signal[0]
         mi = -1
@@ -367,7 +377,7 @@ class Cursor(object):
             if signal[k] > m:
                 mi = k
                 m = signal[k]
-        new_ts = ts + mi - 5
+        new_ts = ts + mi - radius
         if mi != -1 and new_ts != ts:
             print("New timestamp {} for spike {} => {}".format(spike_id, ts, new_ts))
             self.es.execute("replace into spiketimes values ({}, {})".format(spike_id, new_ts) )
@@ -511,6 +521,10 @@ class Cursor(object):
         elif event.key == ' ':
             # Move to the next anomalous interval:
             self.refresh( beats.next() - (self.npts/2) )
+            self.prev_line = None
+        elif event.key == 'b':
+            # Move to the previous anomalous interval:
+            self.refresh( beats.prev() - (self.npts/2) )
             self.prev_line = None
         elif event.key == 't':
             print("Fix {}".format(self.prev_line))
