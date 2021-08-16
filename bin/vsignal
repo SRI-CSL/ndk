@@ -30,6 +30,7 @@ parser.add_argument('-channel', default='0', help='Comma separated list of chann
 parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, attempts to overlay raw data.')
 parser.add_argument('-ts', dest='plot_ts', action='store_true', help='If provided, plots timestamps as vertical lines, color determined by label.')
 parser.add_argument('-cooked', dest='cooked', action='store_true', help='If provided, plots the db-generated waveforms.')
+parser.add_argument('-miss', dest='miss', action='store_true', help='If provided, sorts by mis-detection (bad peak).')
 parser.add_argument('-filter',  default="300:2000")
 parser.add_argument('-resp', dest='resp', action='store_true', default=False, help='If provided, use low-pass filtering to detect respiration events.')
 parser.add_argument('-cardiac', dest='cardiac', action='store_true', help='If provided, will use "-raw -ts -filter none" as args.')
@@ -44,6 +45,8 @@ if ns.cardiac:
     ns.plot_ts = True
     ns.filter = "none"
 
+
+    
 class Beats:
     def __init__(self, event_store, channel=None):
         self.id_from_samplenum = {}
@@ -89,11 +92,15 @@ class Beats:
         self.index = 0
 
     def next(self):
+        if self.index >= len(self.intervals):
+            self.index = len(self.intervals) - 1
         diff, time = self.intervals[self.index]
         self.index += 1
         return time
 
     def prev(self):
+        if self.index < 0:
+            self.index = 0
         diff, time = self.intervals[self.index]
         self.index -= 1
         return time
@@ -367,6 +374,24 @@ class Cursor(object):
 
         plt.draw()
 
+    def check_timestamp(self, spike_id, ts, radius=20):
+        #print("Fixing spike {} timestamp at {}".format(spike_id, ts))
+        signal = self.ds.get_chunk(self.chan, ts - radius, ts + radius)
+        k = 0
+        mi = -1
+        m = signal[0]
+        maxsig = m
+        for k in range(len(signal)):
+            if signal[k] > maxsig:
+                mi = k
+                maxsig = signal[k]
+        # We'll try sorting on this quantity (difference between
+        # highest amplitude and current amplitude):
+        if mi == -1:
+            return 0
+        else:
+            return abs(mi-radius)
+        
     def fix_timestamp(self, spike_id, ts, radius=10):
         #print("Fixing spike {} timestamp at {}".format(spike_id, ts))
         signal = self.ds.get_chunk(self.chan, ts - radius, ts + radius)
@@ -544,6 +569,24 @@ class Cursor(object):
                 spike_ts = r[1]
                 nchanged += self.fix_timestamp(spike_id, spike_ts)
             print("{} beats were adjusted.".format(nchanged))
+        elif event.key == 'M':
+            print("Finding mis-detects")
+            self.es.execute("select * from spiketimes")
+            results = self.es.fetchall()
+            nchanged = 0
+            self.intervals = []
+            for r in results:
+                spike_id = r[0]
+                spike_ts = r[1]
+                tdiff = self.check_timestamp(spike_id, spike_ts)
+                self.intervals += [ (tdiff, spike_ts) ]
+            def car(a):
+                return a[0]
+            self.intervals.sort(key=car, reverse=True)
+            for x in self.intervals:
+                if (x[0] > 0):
+                    print(x)
+            self.index = 0
         elif event.key == 'delete' or event.key == 'backspace':
             print("Delete {}".format(self.prev_line))
             if self.prev_line:

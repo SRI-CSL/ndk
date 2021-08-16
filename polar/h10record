@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 #    /usr/local/bin/python3
+
+
+# Script for stimulus synthesis, playback and ECG recording from Polar
+# H10 chest strap: This really belongs in NDE as opposed to NDK.
+
 import os
 import sys
 import math
@@ -95,7 +100,9 @@ uuid16_dict = {v: k for k, v in uuid16_dict.items()}
 # Not sure, but it looks as if these addresses are dependent on both
 # the device (H10) and the host (CIC CSL Laptop)!
 #
-ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
+# Really need to figure out how to detect and use any old Polar H10:
+#ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
+ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
 
 ## UUID for model number ##
 MODEL_NBR_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
