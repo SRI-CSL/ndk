@@ -1,0 +1,58 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import time
+import ndk
+import ndk.es.db3 as db
+
+#
+# Takes a single argument, the name of a .db file, and ensures that
+# the .db file and its original data source object are all
+# datestamped.  This requires that the name of the file should begin
+# with a datestamp of the form: yyyy-mm-dd-hhmm, where yyyy is the
+# year, mm is the month, dd is the date, and hhmm is a 24-hour time.
+#
+# Special case: some files were erroneously labeled with the year
+# "2010".  This special case will be automatically converted to the
+# year 2021.
+#
+
+def parse_name(filename):
+    tuple = time.strptime(filename, "%Y-%m-%d-%H%M")
+    string = time.asctime(tuple)
+    return string
+
+
+
+
+full_filename = sys.argv[1]
+if not os.path.exists(full_filename):
+    print(f"File {filename} does not exist!")
+else:
+    head, tail = os.path.split(full_filename)
+    filename = tail
+    names = tail.split('.')
+    if len(names) < 2 or names[-1] != 'db':
+        print("The named file MUST be a .db file.")
+        quit()
+    else:
+        datestamp = parse_name(names[0])
+        print(f"The datestamp for this dataset is {datestamp}")
+
+    print(f"Changing working directory to {head}.")
+    os.chdir(head)
+    print(f"Opening {filename}...")
+    dbobj = db.open_event_store(filename)
+    dbobj.set_datestamp(datestamp)
+    
+    samprate, nchannels, recfile = dbobj.get_metadata()
+    dsobj = ndk.ds.open(recfile)
+    
+    md = ndk.ds.read_nbm(dsobj.mdfile)
+
+    print(f"Placing datestamp '{datestamp}' in file {dsobj.mdfile}.")
+    md.datestamp = datestamp
+    md.save()
+
+    dbobj.close()

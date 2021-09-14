@@ -55,6 +55,13 @@ samprate = info[1]
 t0 = info[2]
 t1 = info[3]
 seg = info[4]
+try:
+    datestamp = seg.md.datestamp
+    print(f"Found nbm datestamp: {datestamp}")
+except:
+    datestamp = time.ctime(time.time())
+    print(f"Using current time for datestamp: {datestamp}")
+    
 events = None
 if len(info) > 5:
     iprint('Found events:')

@@ -6,6 +6,7 @@ import pickle
 from .dsfilter import *
 from ndk.ui import iprint,wprint,eprint
 import ndk.ds
+import time
 
 NEW_NBM = True
 NEW_FILTERING = True
@@ -25,7 +26,8 @@ class nb_metadata:
     # Problem: this initialization will, by default, create a bunch of
     # absolute pathnames, which we don't want.
     """Primary class for handling NDK Binary Format data stores."""
-    def __init__(self, dirname, sample_rate=32000.0, nchannels=1, start=0, end=0, relative=False, attributes={}):
+    def __init__(self, dirname, sample_rate=32000.0, nchannels=1, start=0, end=0, relative=False, attributes={}, date=None):
+        # 'date' should be an ascii date as might be returned by time.ctime(), or None.
         self.dirname = os.path.abspath(dirname)
         self.name = os.path.basename(self.dirname)
         self.filename = os.path.join(self.dirname, '{}.nbm'.format(self.name))
@@ -43,6 +45,10 @@ class nb_metadata:
         self.start = start
         self.end = end
         self.attributes = attributes
+        if date is None:
+            self.datestamp = time.ctime(time.time())
+        else:
+            self.datestamp = date
 
     def rawfile(self):
         """Returns the absolute pathname for the raw data file."""
@@ -107,6 +113,7 @@ class nb_metadata:
                 f.write("source={}\n".format(p1))
             else:
                 f.write("source={}\n".format(source))
+            f.write("datestamp={}\n".format(self.datestamp))
                 
 
 
@@ -124,6 +131,11 @@ file contains basic information about the recording."""
                 iprint('Attribute: {} = {}'.format(x[0],x[1]))
             else:
                 wprint("Don't know what to do with this line: {}".format(line))
+    try:
+        date = attrs['date']
+    except:
+        date = None
+        
     if attrs['dirname'][0] == '.':
         new_dirname = os.path.dirname(os.path.abspath(filename))
         attrs['dirname'] = new_dirname
@@ -132,6 +144,7 @@ file contains basic information about the recording."""
                            nchannels=int(attrs['nchannels']), 
                            start=int(attrs['start']), 
                            end=int(attrs['end']),
+                           date=date,
                            attributes=attrs  )
     return metadata
 
@@ -148,7 +161,7 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
     nchan = data_shape[0]
     npts = data_shape[1]
         
-    md = nb_metadata(dirname, sample_rate, nchan, start, end, relative)
+    md = nb_metadata(dirname, sample_rate, nchan, start, end, relative, date=None)
     filename = md.filename
 
     # If the directory doesn't exist, create it:
@@ -188,7 +201,7 @@ arguments.  If supplied, 'events' is a list of time,event pairs."""
 
 
 # Other physiological data:
-def wfdb_to_nbf(filename, to_dir, channel_names=['V1', 'V2', 'V3', 'V4']):
+def wfdb_to_nbf(filename, to_dir, channel_names=['V1', 'V2', 'V3', 'V4'], date=None):
     iprint("Creating nbf from file: {}".format(filename))
 
     data,fields = wfdb.rdsamp(filename)
@@ -207,7 +220,7 @@ def wfdb_to_nbf(filename, to_dir, channel_names=['V1', 'V2', 'V3', 'V4']):
     indices = [fields['sig_name'].index(x) for x in channel_names]
     nchan = len(indices)
     
-    md = nb_metadata(to_dir, sample_rate, nchan, start, end, True)
+    md = nb_metadata(to_dir, sample_rate, nchan, start, end, True, date=date)
 
     nbf_filename = md.filename
 
@@ -319,7 +332,7 @@ class nbf:
         iprint('Checking for metadata file {}'.format(self.mdfile))
         if not os.path.exists(self.mdfile):
             dirname = os.path.dirname(os.path.abspath(self.mdfile))
-            self.md = nb_metadata(dirname, sample_rate=sample_rate, start=start, end=end, nchannels=nchannels)
+            self.md = nb_metadata(dirname, sample_rate=sample_rate, start=start, end=end, nchannels=nchannels, date=None)
         elif NEW_NBM:
             self.md = read_nbm(self.mdfile)
         else:

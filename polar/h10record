@@ -28,6 +28,7 @@ import sounddevice as sd
 
 state_machine = None
 
+
 def ss_to_wav(ssfile):
     global state_machine
     state_machine = nde.ssread.ssread(ssfile)
@@ -102,8 +103,8 @@ uuid16_dict = {v: k for k, v in uuid16_dict.items()}
 #
 # Really need to figure out how to detect and use any old Polar H10:
 #ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
-ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
-
+#ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
+ADDRESS = "12B92F7F-2250-490D-8B99-D69912619B37"  # Polar H10 78F5B92F -45
 ## UUID for model number ##
 MODEL_NBR_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
     uuid16_dict.get("Model Number String")
@@ -143,6 +144,14 @@ ecg_session_time = []
 sync = asyncio.Event()
 sync.clear()
 first = True
+datestamp = time.ctime(time.time())
+
+
+#
+# Need to get our time act together.  NDK .db files will only store
+# samplenums relative to the start of the recording.  The file name is
+# used as a kind of datestamp.  See the NDK TODO file for more info.
+#
 
 def save_signal(data, name):
     p_signal = np.asarray(data, dtype=np.float64)
@@ -172,7 +181,7 @@ def save_and_process(data, name, channels=['V1']):
     src_dat = name + '.dat'
     to_dir = './'+name+'/'
     print("Saving wfdb record {} to directory {}.".format(name, to_dir))
-    wfdb_to_nbf(name, to_dir, ['V1'])
+    wfdb_to_nbf(name, to_dir, ['V1'], date=datestamp)
     os.system("cp {} {}".format(ssfile, to_dir))
     # shutil.copyfile(ssfile, to_dir)
     print("Saving a copy of wfdb header file {} to {}".format(src_hdr, to_dir))

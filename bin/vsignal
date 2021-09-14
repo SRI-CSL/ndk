@@ -16,7 +16,11 @@ from scipy.signal import convolve, freqz
 from ndk.ui import iprint, wprint, eprint
 
 # Probably doesn't work on Windows:
-# matplotlib.use('GTKAgg')
+# This one will not pick up Shift, Control, etc. modifier keys.
+# matplotlib.use('MacOSX')
+
+# This one seems to pick up the modifiers:
+matplotlib.use('TkAgg')
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
@@ -419,6 +423,7 @@ class Cursor(object):
         #        return max(0,min(k,self.n-1))
 
     def mouse_move(self, event):
+        # print(f"Mouse move:  button={event.button}, key={event.key}")
         if not event.inaxes:
             return
 
@@ -469,6 +474,7 @@ class Cursor(object):
     # What happens when we press the mouse button: if left (1), start
     # a state.  If right (3), delete the state:
     def mouse_press(self, event):
+        print(f"Mouse press:  button={event.button}, key={event.key}")
         if event.button == 1 or event.button == 3:
             self.press = event.xdata, event.ydata
             if event.button == 3 and event.key == "shift":
@@ -495,6 +501,8 @@ class Cursor(object):
             self.stop_drag(event)
 
     def key_press(self, event):
+        # print(f"Key press: {event.key}")
+        sys.stdout.flush()
         if event.key == 'q':
             quit()
         elif event.key == 'e':
@@ -598,6 +606,10 @@ class Cursor(object):
                 self.prev_line = None
         else:
             print("Event key: ", event.key)
+
+    def key_release(self, event):
+        print(f"Key release: {event.key}")
+        sys.stdout.flush()
 
     def next(self, event, incr=0):
         if incr == 0:
@@ -725,6 +737,7 @@ for p in plots:
     plt.connect('button_press_event', p.mouse_press)
     plt.connect('button_release_event', p.mouse_release)
     plt.connect('key_press_event', p.key_press)
+    plt.connect('key_release_event', p.key_release)
     plt.connect('pick_event', p.on_pick)
 
 # soff = Slider(ax, 'Offset', t0, t1, plot.t0)

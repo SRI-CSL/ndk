@@ -845,6 +845,12 @@ combination."""
         x = self.fetchone()
         return x[1]
 
+    def set_datestamp(self, datestamp_string):
+        self.set_property('datestamp', datestamp_string)
+
+    def get_datestamp(self):
+        return self.get_property('datestamp')
+
     # We represent each spike as a vector of coefficients for a particular
     # orthonormal basis.  The basis is represented in a table 'basis' that
     # contains a basisID, a sigma, and a width in SAMPLES.  The
