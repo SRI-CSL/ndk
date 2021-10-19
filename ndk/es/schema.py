@@ -21,6 +21,8 @@ class schema ():
         self.defs['spikechannels'] =  'CREATE TABLE spikechannels( spikeID integer primary key, channel integer );'
         self.defs['spikelabels']   =  'CREATE TABLE spikelabels( spikeID integer primary key, label integer,  FOREIGN KEY (spikeID) REFERENCES spiketimes(spikeID) ON DELETE CASCADE );'
 
+        self.defs['glucose']       =  'CREATE TABLE glucose( samplenum integer primary key, channel integer, value integer );'
+
         self.defs['meta']          =  'CREATE TABLE meta ( samplerate real, nchannels integer, datafile text);'
         self.defs['history']       =  'CREATE TABLE history( seqno integer primary key, date varchar(255), operation varchar(255) );'
         self.verbose = True

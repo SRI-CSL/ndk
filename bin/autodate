@@ -26,7 +26,13 @@ def parse_name(filename):
 
 
 
+if len(sys.argv) < 2:
+    print("Usage: autodate <dbfile>")
+    quit()
+
 full_filename = sys.argv[1]
+
+
 if not os.path.exists(full_filename):
     print(f"File {filename} does not exist!")
 else:
@@ -40,8 +46,9 @@ else:
         datestamp = parse_name(names[0])
         print(f"The datestamp for this dataset is {datestamp}")
 
-    print(f"Changing working directory to {head}.")
-    os.chdir(head)
+    if len(head) > 0:
+        print(f"Changing working directory to {head}.")
+        os.chdir(head)
     print(f"Opening {filename}...")
     dbobj = db.open_event_store(filename)
     dbobj.set_datestamp(datestamp)

@@ -1,0 +1,74 @@
+The "standard" recipe for recording:
+
+Requirements:
+
+1) Audio or electrical stimulation equipment plugged into your laptop
+or connected via bluetooth.
+
+2) A stimulus (.ss) file, preferably 30 minutes long with a named
+'stim' state.  Call this "stim.ss".
+
+3) A polar H10 chest strap (worn close to the sternum)
+
+4) A python environment in which you have installed NDK and NDE - this
+HOWTO also assumes that you have placed these packages into /opt/ndk
+and /opt/nde respectively, especially for scripts that are not
+installed in default places (e.g. h10record).
+
+
+
+
+Steps for recording in a terminal window (these are shell commands):
+
+1) cd <recdir>
+
+   -- cd to a directory that will contain all your recordings, and
+      make sure it contains your stim.ss file
+
+2) /opt/ndk/polar/h10record <2021-MM-DD-HHmm> stim.ss
+
+   -- where MM is the month, DD is the day, HH is the hour (24-hour
+      clock) and mm is the minute for the start of recording.  This
+      will play a stimulus through the audio output and collect data
+      from the chest strap.  If you are wearing a glucose sensor,
+      please scan for glucose as frequently as possible - preferably
+      every minute.
+
+
+3) make_polar_db <2021-MM-DD-HHmm>
+
+   -- This will create a file named 2021-MM-DD-HHmm.db - this is the
+      event database containing timestamped cardiac R peaks and
+      stimulus event info.
+
+4) vsignal -cardiac 2021-MM-DD-HHmm.db
+
+   -- This will bring up a plot of the cardiac signal.  The recording
+      can be reviewed and edited to modify false detections, ectopic
+      beats, or misaligned detections.  We need a separate tutorial
+      for this program.
+
+5) /opt/nde/scripts/hrv_all.py
+
+   -- This will compute heart rate, gastric power, and HRV over all
+      available recordings in the current directory.  This script will
+      generate gnuplot source for plotting means and envelopes for
+      these quantities.
+
+6) autodate 2021-MM-DD-HHmm.db
+
+   -- This is only temporary, but is required if you want to import
+      glucose data into the .db file.  This script inserts a
+      start-of-recording datestamp obtained by parsing the filename as
+      a date.
+
+7) add-glucose -db 2021-MM-DD-HHmm.db -glucose <glucose.csv>
+
+   -- If you have downloaded your glucose data from the Libreview
+      website, you can add the glucose values and timestamps to the
+      given database file.  Currently, the default is to insert data
+      up to four hours after the recording start time, so it's best to
+      wait until after 4 hours post-recording to add the glucose data.
+
+
+Glucose summaries are a work in progress.

@@ -1,6 +1,14 @@
+ALL TO DO ITEMS HAVE BEEN MOVED HERE:
+
+/opt/projects/neurome/TODO
+
+Refer to this file from now on.
+
+
+
 9/10/2021:
 
-1) Establish a convention for saving the dataset's creation time
+[1) Establish a convention for saving the dataset's creation time
 (i.e., when recordings start and end).  Right now, things are
 expressed in terms of sample numbers offset from the start of
 recording.  This is not enough if we want a concordance between H10
@@ -9,30 +17,18 @@ recordings and Libre Freestyle datapoints.
 A high-precision "datestamp" should be preserved at the start of a
 recording session, and then propagated through the nbf and .db
 formats, perhaps through the 'properties' table.  This datestamp will
-fix the start sample number to a specific date and time.
-
-2) Using the convention defined in (1), implement an "auto-datestamp"
-utility that will automatically datestamp a .db file (and its
-corresponding data store) according to the filename.  This is a cheap
-way of anchoring early glucose datasets to a specific date and time.
-Once (3) is implemented, we won't need this utility since recordings
-will automatically datestamp everything.
-
-3) Design a master glucose database that can import data from the
-downloadable LibreView .csv files.  Pandas is great for this, but it
-ought to be set up as a database so that each measurement is unique,
-with the datestamp as key.  We can also store some of these glucose
-numbers within .db files, probably using a separate, optional
-'glucose' table.  In contrast to the master glucose table, though, the
-table in the .db file will store glucose levels using a samplenum,
-which is an offset (in H10 sample units) from the start of the
-recording.  This ensures that all times in the .db file are sample
-numbers for the most frequently sampled quantity in the database.
-
-
+fix the start sample number to a specific date and time.]
 
 
 OLD:
+
+2) DONE: Using the convention defined in (1), implement an
+"auto-datestamp" utility that will automatically datestamp a .db file
+(and its corresponding data store) according to the filename.  This is
+a cheap way of anchoring early glucose datasets to a specific date and
+time.  Once (3) is implemented, we won't need this utility since
+recordings will automatically datestamp everything.
+
 
 - Legends & labels for clustered entities:
 
