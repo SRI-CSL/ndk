@@ -48,6 +48,12 @@ Steps for recording in a terminal window (these are shell commands):
       beats, or misaligned detections.  We need a separate tutorial
       for this program.
 
+4a) /opt/nde/scripts/fix-orphans 2021-MM-DD-HHmm.db
+
+   -- This will fix orphan spikes in a database file.  Orphans can
+      occur after editing, so this is a) a hack to fix a bug and b)
+      will not be necessary in the future.
+
 5) /opt/nde/scripts/hrv_all.py
 
    -- This will compute heart rate, gastric power, and HRV over all
