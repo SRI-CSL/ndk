@@ -6,3 +6,32 @@ data to file.
 
 ECG looks decent, but timestamp is unclear.  Is it ticks of 1/130
 second?  I am pretty sure that this is the case.
+
+
+===
+
+05/08/2023: Time to think about event-gated stimulus.  We will have to
+define short packets that are delivered in response to external
+events.  Here are fun event categories:
+
+1) R peak referenced phases of the cardiac cycle (R plus time offset)
+2) Phase of respiration
+3) Cue presentation
+4) Reward presentation
+
+How to do this?  First, define the stimlet to be used.  This is a
+short-duration .ss program.  If the .ss program is longer than the
+cycle in question, we simply play it anyway and gate on the next
+"available" event.
+
+Precompute all packets by converting the .ss files to waveforms that
+can be delivered as soon as the event is flagged.
+
+Event detection: For cardiac and respiration, we need to rely on the
+incoming cardiac or respiration pulse.  This means that we will need
+to find peaks perhaps by thresholding the appropriate component, and
+then deliver the stim at some offset after that event.
+
+For behavioral events (cues, rewards) we will need some external
+marker.  For motor acts, we can use accelerometers.  For visual cues,
+we could, for example, sync with display devices.

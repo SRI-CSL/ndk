@@ -41,18 +41,28 @@ Steps for recording in a terminal window (these are shell commands):
       event database containing timestamped cardiac R peaks and
       stimulus event info.
 
-4) vsignal -cardiac 2021-MM-DD-HHmm.db
+4) vsignal -cardiac 202x-MM-DD-HHmm.db  OR
+   vsignal -ts -raw -filter none YYYYMMDD-HHmm.db
 
    -- This will bring up a plot of the cardiac signal.  The recording
       can be reviewed and edited to modify false detections, ectopic
       beats, or misaligned detections.  We need a separate tutorial
       for this program.
 
+   -- The second command is suitable for principal component
+      visualization.
+
 4a) /opt/nde/scripts/fix-orphans 2021-MM-DD-HHmm.db
 
-   -- This will fix orphan spikes in a database file.  Orphans can
-      occur after editing, so this is a) a hack to fix a bug and b)
-      will not be necessary in the future.
+   -- If needed, this will fix orphan spikes in a database file.
+      Orphans can occur after editing, so this is a) a hack to fix a
+      bug and b) will not be necessary in the future.
+
+From here, the analysis is geared toward long-term HRV.  The
+alternative, newer analysis uses Fourier components to present cardiac
+dynamics projected onto specific frequencies.  This reveals
+stimulus-dependent phase shifts and possibly other phenomena that
+cause samples to cluster in a stim-dependent way.
 
 5) /opt/nde/scripts/hrv_all.py
 

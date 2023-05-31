@@ -100,6 +100,75 @@ def gauss_kernel(width=64, sigma=20, offset=0, deriv=0):
 
 
 
+
+def gen_squarewave(m, pulse, amplitude=1.0, bipolar=True):
+    """Construct and return a square waveform array of length m samples
+and pulse width 'pulse' samples."""
+    result = np.zeros(m)
+    p2 = int(0.5 * pulse)
+    result[0:p2] = amplitude
+    if bipolar:
+        result[p2:pulse] = -amplitude
+    else:
+        result[p2:pulse] = amplitude
+    return result
+
+
+def sq_kernel(width=64, duration=20, offset=0, deriv=0):
+    """Compute a square wave kernel vector with the specified width and duration (sigma)."""
+    # This will produce the orthonormal set of Gaussians and their
+    # derivatives using a closed form solution:
+    w = int(width)
+    print(f"w = {w}")
+    # Array of kernel values:
+    ker = np.zeros(w, dtype=np.float32)
+    z = (0.5 * width) + offset
+
+    # Fit square waves into this interval:
+    h = 0.5 * duration
+    i0 = int(z - h)
+    i1 = int(z + h + 1)
+
+    a = -1
+    b = -1
+    nflips = deriv + 1
+    ns = int( (i1 - i0) / nflips )
+    i = i0
+    for k in range(nflips):
+        for j in range(ns):
+            ker[i] = b
+            i += 1
+        b = b * a
+
+    return ker
+
+def sq_kernel0(width=64, duration=20, offset=0, deriv=0):
+    """Compute a square wave kernel vector with the specified width and duration (sigma)."""
+    # This will produce the orthonormal set of Gaussians and their
+    # derivatives using a closed form solution:
+    w = int(width)
+    print(f"w = {w}")
+    # Array of kernel values:
+    ker = np.zeros(w, dtype=np.float32)
+    z = (0.5 * width) + offset
+
+    i0 = int(z - duration)
+    i1 = int(z + duration)
+
+    a = -1
+    b = -1
+    n = (deriv+1)
+    k = (i1 - i0) / n
+    for i in range(i0, i1):
+        j = i % k
+        if n > 1 and j == 0:
+            b = b * a
+        ker[i] = b
+
+    return ker
+
+
+
 #
 # Estimate the 1st derivative of the signal vector using a 3-point
 # difference:
@@ -209,6 +278,42 @@ def check_orth(seq, tol=1.0e-04, verbose=True):
         else:      eprint("Basis is NOT orthonormal")
     return orth
 
+
+def sqkernel_sequence(duration, width=64, ncomp=5, offset=0):
+    """Compute an initial approximation to an orthonormal sequence of
+functions, based on the Gaussian and its derivative, using the
+specified standard deviation, width (default 64) and number of
+components (default 5)."""
+    result = []
+    g0 = sq_kernel(width=width, duration=duration, offset=offset)
+    result.append(g0)
+    for i in range(0,ncomp-1):
+        # We are going to use g0 to store successive derivatives, and
+        # copy into g to create new vectors to populate the set:
+        g0 = sq_kernel(width=width, duration=duration, offset=offset, deriv=i+1)
+        g = np.zeros( int(width) )
+        g[:] = g0[:]
+        result.append(g)
+    return result
+
+
+
+# The defaults here work well for a width of 64:
+def sqbasis(duration=10.0, width=64, nlevels=5, offset=0):
+    """Construct a basis sequence with the desired standard deviation
+(sigma), the specified width, and the number of components (basis
+functions)."""
+    # print( "In ndk.features.basis, width = {}".format(width) )
+    s0 = sqkernel_sequence(duration, width, nlevels, offset)
+    # s1 = gs_sequence(s0)
+    check_orth(s0)
+    #s1 = gs_sequence(s0)
+    return s0
+
+def square_wave_basis(duration, width, nfuncs):
+    return sqbasis(duration, width, nfuncs)
+
+
 #
 # The defaults here work well for a width of 64:
 def basis(sigma=10.0, width=64, nlevels=5, offset=0):
@@ -221,7 +326,6 @@ functions)."""
     check_orth(s0)
     #s1 = gs_sequence(s0)
     return s0
-
 
 
 def gaussian_basis(sigma, width, nfuncs):
@@ -259,18 +363,6 @@ def gen_waveform(coefs, seq):
         result += coefs[i] * fn
     return result
 
-
-def gen_squarewave(m, pulse, amplitude=1.0, bipolar=True):
-    """Construct and return a square waveform array of length m samples
-and pulse width 'pulse' samples."""
-    result = np.zeros(m)
-    p2 = int(0.5 * pulse)
-    result[0:p2] = amplitude
-    if bipolar:
-        result[p2:pulse] = -amplitude
-    else:
-        result[p2:pulse] = amplitude
-    return result
 
 
 

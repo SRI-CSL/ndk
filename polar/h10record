@@ -28,20 +28,31 @@ import sounddevice as sd
 
 state_machine = None
 
+class cardiacPeakEvent(asyncio.Event):
+    def __init__(self, stim_name):
+        super().__init__()
+        self.stim_name = stim_name
 
-def ss_to_wav(ssfile):
+# the ECG collector is the caller and sets the cardiacPeakEvent when a
+# peak is detected or a threshold is exceeded.  The play_buffer
+# routine checks this event and when set, emits an event-gated stim
+# signal.
+
+def ss_to_wav(ssfile, force=False):
     global state_machine
     state_machine = nde.ssread.ssread(ssfile)
     nsecs = state_machine.duration
     nminutes = nsecs / 60
     print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
     seq = nde.gen.gen_sequence(state_machine)
+    #for x in seq:
+    #    print(x)
     wavfile = ssfile[:-3] + ".wav"
-    if os.path.exists(wavfile):
+    if os.path.exists(wavfile) and not force:
         print("Re-using wav file for stimulus: {}".format(wavfile))
     else:
         print("Generating wav file for stimulus in {}".format(wavfile))
-        stream = stim.WAV_out(wavfile, samprate=48100)
+        stream = stim.WAV_out(wavfile, samprate=state_machine.stim_samprate)
         tprev = 0
         sampnum = 0
         for i in range(len(seq)):
@@ -50,7 +61,7 @@ def ss_to_wav(ssfile):
                 delta = int ( stream.samprate * (time - tprev) )
             else:
                 delta = 0
-            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp)
+            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp )
             tprev = time
    
         stream.put_sample(0.0, finish=True)
@@ -60,12 +71,20 @@ def ss_to_wav(ssfile):
 
 
 if (len(sys.argv) == 1):
-    print("Usage: h10record <collection_dir> [<ss_file>]")
+    print("Usage: h10record <collection_dir> [<ss_file> [events_out]]")
     exit()
 
 if (len(sys.argv) > 1):
     record_name = sys.argv[1]
-    print("Sending data to {}".format(sys.argv[1]))
+    pair = record_name.split('.')
+    if pair[-1] == 'ss':
+        ssfile = record_name
+        print(f"Translating ss to wav: {ssfile}")
+        wavfile = ss_to_wav(ssfile, force=True)
+        quit()
+    else:
+        record_name = sys.argv[1]
+        print("Sending data to {}".format(sys.argv[1]))
 
 if (len(sys.argv) > 2):
     if sys.argv[2].isdigit():
@@ -79,6 +98,11 @@ if (len(sys.argv) > 2):
         print(info[-1])
         if info[-1] == 'ss':
             wavfile = ss_to_wav(ssfile)
+            if len(sys.argv) > 3:
+                # Just list the events
+                print(f"Saving state event info in {sys.argv[3]}")
+                state_machine.save_events( sys.argv[3] , sql=True)
+                quit()
         else:
             wavfile = ssfile
             print("Using precomputed WAV file: ", wavfile)
@@ -105,6 +129,7 @@ uuid16_dict = {v: k for k, v in uuid16_dict.items()}
 #ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
 #ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
 ADDRESS = "12B92F7F-2250-490D-8B99-D69912619B37"  # Polar H10 78F5B92F -45
+ADDRESS = "E9277C23-100C-4219-A3A0-E34C9195C22A"  # Polar H10 AFEBBC25 -50
 ## UUID for model number ##
 MODEL_NBR_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
     uuid16_dict.get("Model Number String")
@@ -224,7 +249,8 @@ def keyboardInterrupt_handler(signum, frame):
 discard = -1 # 130 * 60
 npts = 0
 
-## Bit conversion of the Hexadecimal stream
+## Bit conversion of the Hexadecimal stream - here is where we could
+## detect signal events and issue stim. events:
 def data_conv(sender, data):
     global psec, time_0, sync, first, discard, npts
     sync.set()
@@ -278,6 +304,7 @@ async def play_buffer(buffer, **kwargs):
 
     print("Setting up audio stream")
 
+    # Conditional stim probably needs to live here:
     def callback(outdata, frame_count, time_info, status):
         nonlocal idx
         if status:
@@ -359,7 +386,11 @@ async def run(client, debug=False):
     ## ECG stream started
     await client.start_notify(PMD_DATA, data_conv)
 
+    # How can we modify this to stimulate conditional on events?
     playback_event, playback_stream = await play_buffer(wave_buffer)
+    # Perhaps play_buffer can check for events and deal with it that
+    # way.  play_buffer would have to have a list or dict of wav
+    # buffers to be used when conditions arise.
 
     print("Collecting ECG data...")
 
