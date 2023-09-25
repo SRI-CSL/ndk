@@ -8,11 +8,13 @@ import ndk.es.db3 as db
 import math
 import argparse
 
+from ndk.features import butter_low, butter_bandpass
+
 import sqlite3
 import numpy as np
 import matplotlib
 from matplotlib.widgets import Slider, Button
-from scipy.signal import convolve, freqz
+from scipy.signal import convolve, freqz, lfilter
 from ndk.ui import iprint, wprint, eprint
 
 # Probably doesn't work on Windows:
@@ -31,6 +33,7 @@ global spike, nspikes, sl, lo, hi, samprate
 parser = argparse.ArgumentParser(description='Plot all waveforms for a given cluster and channel.')
 parser.add_argument('files',  metavar='FILE', nargs=1, help='An sqlite3 database file.')
 parser.add_argument('-channel', default='0', help='Comma separated list of channels to be used.  Default is 0 (first channel).')
+parser.add_argument('-egans', default=None, help='Plot the named egans detector results along with the signal.')
 parser.add_argument('-raw', dest='raw', action='store_true', help='If provided, attempts to overlay raw data.')
 parser.add_argument('-ts', dest='plot_ts', action='store_true', help='If provided, plots timestamps as vertical lines, color determined by label.')
 parser.add_argument('-cooked', dest='cooked', action='store_true', help='If provided, plots the db-generated waveforms.')
@@ -203,8 +206,12 @@ class Cursor(object):
         self.drag = False
         self.seq = es.get_basis(0)
         self.r1 = None
+        #self.egans_filters = { 'resp' : butter_low(0.5, 130.0, order=5) }
+        self.egans_filters = { 'resp' : butter_bandpass(0.08, 0.4, 130.0, order=3) }
         if ns.cooked:
             self.x = self.es.get_signal(self.chan, self.x0, self.x0 + self.npts)
+        elif ns.egans is not None:
+            self.x = self.egans(ns.egans, self.chan, self.x0, self.x0 + self.npts)
         else:
             self.x = np.zeros(self.npts)
             self.x[:] = 0.0
@@ -260,6 +267,9 @@ class Cursor(object):
         self.npts = new_npts
         if ns.cooked:
             self.x = self.es.get_signal(self.chan, self.x0, self.x0 + self.npts)
+        elif ns.egans is not None:
+            self.x = self.egans(ns.egans, self.chan, self.x0, self.x0 + self.npts)
+
         if ns.raw:
             tmp = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
             if ns.resp:
@@ -315,6 +325,8 @@ class Cursor(object):
 
         if ns.cooked:
             self.es.get_signal(self.chan, self.x0, self.x0 + self.npts, self.x)
+        elif ns.egans is not None:
+            self.x = self.egans(ns.egans, self.chan, self.x0, self.x0 + self.npts)
         if ns.raw:
             tmp = self.ds.get_chunk(self.chan, self.x0, self.x0 + self.npts)
             if ns.resp:
@@ -349,6 +361,12 @@ class Cursor(object):
                 self.ax1.plot(self.time, self.x[0:l], color='blue')
             else:
                 self.ax1.plot(self.time, self.x, color='blue')
+        elif ns.egans is not None:
+            if len(self.x) > l:
+                self.ax1.plot(self.time, self.x[0:l], color='blue')
+            else:
+                self.ax1.plot(self.time, self.x, color='blue')
+
         if ns.raw:
             if len(self.y) > l:
                 self.ax1.plot(self.time, self.y[0:l]*self.yscale, color='red')
@@ -395,7 +413,33 @@ class Cursor(object):
             return 0
         else:
             return abs(mi-radius)
+
+    def resp_detect(self, signal):
+        # This detector wants to see a positive zero-crossing of the
+        # first derivative:
+        b, a = self.egans_filters['resp']
+        out = lfilter(b, a, signal)
+        d_out = out[:]
+        d_out[1:] = np.clip(d_out[1:] - out[:-1], -1.0, 1.0)
+        print(f"Out[100]: {d_out[100]}")
+        #out[:] = out[:] * 50.0
+
+        # Arbitrary scaling - in reality we just want to see a
+        # transition from - to +:
+        d_out[:] = d_out[:] * 500.0
+        return d_out
+
+
+
+    def egans(self, which, channel, t0, t1):
+        data = self.ds.get_chunk(self.chan, t0, t1)
+        if which == 'resp':
+            out = self.resp_detect(data)
+            return out
+        else:
+            return np.zeros(len(data))
         
+
     def fix_timestamp(self, spike_id, ts, radius=10):
         #print("Fixing spike {} timestamp at {}".format(spike_id, ts))
         signal = self.ds.get_chunk(self.chan, ts - radius, ts + radius)

@@ -29,7 +29,9 @@ import sounddevice as sd
 
 state_machine = None
 
-# Events for EAVANS:
+# Events for EAVANS:  Event-gated Auricular VAgus Nerve Stimulation
+
+# Changed to EGANS:  Event-GAted Nerve Stimulation
 
 class gatingEvent(asyncio.Event):
     def __init__(self, stim_name, ss_file, timeout=0.5):
@@ -43,6 +45,51 @@ class gatingEvent(asyncio.Event):
         print(self.wave_buffer.shape)
         # What if the wav file has 2 channels?
         self.wave_buffer = self.wave_buffer.reshape( ( len(self.wave_buffer), 1) )
+        # Use this or something like it to prevent overcrowding, e.g.,
+        # if remaining > 0 then detect should decrement it and return
+        # False.  Otherwise it's possible that events that cluster in
+        # time will overwrite the same entries in the output buffer:
+        self.remaining = 0
+
+    def copy_into_buffer(self, into):
+        l_from = len(self.wave_buffer)
+        l_into = len(into)
+        l = min(l_from, l_into)
+        # Ideally, the into buffer is larger than the wave_buffer, but
+        # truncate if necessary:
+        into[:l] = self.wave_buffer[:l]
+
+    def add_into_buffer(self, into):
+        l_from = len(self.wave_buffer)
+        l_into = len(into)
+        l = min(l_from, l_into)
+        # Ideally, the into buffer is larger than the wave_buffer, but
+        # truncate if necessary:
+        into[:l] += self.wave_buffer[:l]
+
+    # We associate a waveform with each gated event.  Copy the
+    # waveform into the specified buffer:
+    #def stim(self, into_buf):
+    #    into_buf[:] = self.wave_buffer[:]
+        
+
+class testEvent(gatingEvent):
+    def __init__(self, stim_name, ss_file):
+        super().__init__(stim_name, ss_file)
+        # detect returns True every 10 calls.  Each call is about 8k
+        # cardiac samples
+        self.interval = 800
+        self.count = 0
+
+    def set_interval(self, dt):
+        self.interval = dt
+
+    def detect(self, signal):
+        self.count += 1
+        if self.count % self.interval == 0:
+            return True
+        else:
+            return False
 
 
 
@@ -73,6 +120,7 @@ class behavioralEvent(gatingEvent):
 event_classes = {
     "respiroPeakEvent" : respiroPeakEvent,
     "cardioPeakEvent"  : cardioPeakEvent,
+    "testEvent"        : testEvent,
     "behavioralEvent"  : behavioralEvent
     }
 
@@ -110,17 +158,39 @@ def load_json_file(filename, verbose=False):
     desc = json.loads(json_in)
     return desc
 
+
+
+def parse_duration(s):
+    if s[-1] == 's':
+        return int(s[:-1])
+    elif s[-1] == 'm':
+        return int(60.0 * float(s[:-1]))
+    else:
+        # Default to seconds?
+        return int(s)
+
+
+# This will ingest the event spec and will automatically convert .ss
+# files to WAV if needed.
 def parse_event_desc(event_file, force=False):
     d = load_json_file(event_file)
+    stimulus_sample_rate = float(d['stimulus_sample_rate'])  # Samples per second
+    duration = d['duration']  # In seconds
     events = d['events']
+    h10_address = d['address']
     q = []
+    r = {}
     for key in events:
         e = events[key]
         c = event_classes[ e['class'] ]
         waveform = e['waveform']
         event_instance = c(key, waveform)
         q.append(event_instance)
-    return q
+    r['address'] = h10_address
+    r['gating_events'] = q
+    r['stimulus_sample_rate'] = stimulus_sample_rate
+    r['duration'] = parse_duration(duration)
+    return r
 
 
 def ss_to_wav(ssfile, wavfile=None, force=False):
@@ -162,51 +232,32 @@ def ss_to_wav(ssfile, wavfile=None, force=False):
 
 
 
-if (len(sys.argv) == 1):
-    print("Usage: h10eavans <collection_dir> [<event_file>]")
+if (len(sys.argv) != 3):
+    print("Usage: h10eavans <event_definition> <collection_name>")
     exit()
 
-if (len(sys.argv) > 1):
-    record_name = sys.argv[1]
-    pair = record_name.split('.')
-    # Just translates a .ss file to a .wav file:
-    if pair[-1] == 'ss':
-        ssfile = record_name
-        print(f"Translating ss to wav: {ssfile}")
-        wavfile = ss_to_wav(ssfile, force=True)
-        quit()
-    else:
-        record_name = sys.argv[1]
-        print("Sending data to {}".format(sys.argv[1]))
+event_def_file = sys.argv[1]
+collection_name = sys.argv[2]
+print(f"Using event definitions in {event_def_file}")
+print(f"Sending data to {collection_name}")
 
-if (len(sys.argv) > 2):
-    if sys.argv[2].isdigit():
-        nminutes = int(sys.argv[2])
-        nsecs = nminutes * 60
-        print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
-        wave_buffer = None
-    else:
-        ssfile = sys.argv[2]
-        info = ssfile.split('.')
-        print(info[-1])
-        if info[-1] == 'ss':
-            wavfile = ss_to_wav(ssfile)
-            if len(sys.argv) > 3:
-                # Just list the events
-                print(f"Saving state event info in {sys.argv[3]}")
-                state_machine.save_events( sys.argv[3] , sql=True)
-                quit()
-        elif info[-1] == 'json':
-            wave_buffer = None
-            gating_events = parse_event_desc(ssfile)
-            print(f"Event list: {gating_events}")
-        else:
-            wavfile = ssfile
-            print("Using precomputed WAV file: ", wavfile)
-            sr,wave_buffer = scipy.io.wavfile.read(wavfile)
-            print(wave_buffer.shape)
-            # What if the wav file has 2 channels?
-            wave_buffer = wave_buffer.reshape( ( len(wave_buffer), 1) )
+
+# Event-gated description:
+evd = parse_event_desc(event_def_file)
+try:
+    ADDRESS = evd['address']
+    print(f"Using H10 device {ADDRESS} found in {event_def_file}")
+except:
+    print(f"Missing H10 devide address in {event_def_file}.  Using default H10 device {ADDRESS}")
+
+
+# Pick up the needed event and buffering info:
+gating_events = evd['gating_events']
+print(f"Event list: {gating_events}")
+# Max frame number:
+max_idx = int(evd['duration'] * evd['stimulus_sample_rate'])
+wave_buffer = np.zeros((max_idx, 1), dtype='int16')
+# wave_buffer = numpy.zeros(chunk_size, dtype='int16')
 
 
 """ Predefined UUID (Universal Unique Identifier) mapping are based on Heart Rate GATT service Protocol that most
@@ -225,6 +276,10 @@ uuid16_dict = {v: k for k, v in uuid16_dict.items()}
 # Really need to figure out how to detect and use any old Polar H10:
 #ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
 #ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
+#
+# Current solution is to use the EGANS JSON spec as a base - these
+# values can be overridded iff. there is an "address" entry in the
+# JSON spec:
 ADDRESS = "12B92F7F-2250-490D-8B99-D69912619B37"  # Polar H10 78F5B92F -45
 ADDRESS = "E9277C23-100C-4219-A3A0-E34C9195C22A"  # Polar H10 AFEBBC25 -50
 ## UUID for model number ##
@@ -280,7 +335,7 @@ def save_signal(data, name):
     n = len(data)
     p_signal = p_signal.reshape((n,1))
     print(p_signal)
-    record_name = name
+    collection_name = name
     dat_file_name = ['{}.dat'.format(name)]
     units = ['qV']
     fmt = ['16']
@@ -339,7 +394,7 @@ def keyboardInterrupt_handler(signum, frame):
         playback_event.set()
     else:
         # This is just a timed collect with no playback, so save and exit:
-        save_and_process(ecg_session_data, record_name)
+        save_and_process(ecg_session_data, collection_name)
         # sys.exit(0)
         quit()
 
@@ -373,18 +428,15 @@ def data_conv(sender, data):
             else:
                 ecg_session_data.extend([ecg])
                 ecg_session_time.extend([timestamp])
+                for e in gating_events:
+                    if e.detect(ecg):
+                        e.set()
 
 
 def convert_array_to_signed_int(data, offset, length):
-    global gating_events
-    # Here you'll need to scan for signal-based events:
-    print(length)
-    data = int.from_bytes(
+    return int.from_bytes(
         bytearray(data[offset : offset + length]), byteorder="little", signed=True,
     )
-    for e in gating_events:
-        e.detect(data)
-    return data
 
 
 def convert_to_unsigned_long(data, offset, length):
@@ -395,7 +447,7 @@ def convert_to_unsigned_long(data, offset, length):
 
  
 async def play_buffer(buffer, **kwargs):
-    global sync, first, gating_events
+    global sync, first, max_idx, gating_events
 
     # Play the stimulus signal.  For event-gated stim, we *must*
     # impose a duration limit.  Until that limit is reached, we play
@@ -411,30 +463,64 @@ async def play_buffer(buffer, **kwargs):
     idx = 0
     event = asyncio.Event()
 
+    # This needs to change.  In h10egans, buffer is always None:
     if buffer is None:
         print("No buffer, will perform a timed recording.")
         return event, None
 
-    print("Setting up audio stream")
+    print(f"Setting up audio stream: idx={idx} max_idx={max_idx}")
 
-    # Conditional stim probably needs to live here:
+    # Conditional stim probably needs to live here.
     def callback(outdata, frame_count, time_info, status):
+        # idx behaves like time.  Let's use that.
         nonlocal idx
         if status:
             print(status)
-        remainder = len(buffer) - idx
-        if remainder == 0:
+        # In h10egans, buffer == None.  In h10record, the buffer was
+        # one monolithic sequence.  Here, we use multiple buffers
+        # triggered by events.
+        remainder = max_idx - idx
+        # This indicates that the buffer is empty.  In h10record, we
+        # set() the event to kill the collection, but in h10egans, we
+        # set() the event at the preordained stopping time.
+        if remainder <= 0:
+            print(f"Remainder: {remainder}; max_idx={max_idx}, idx={idx}")
             loop.call_soon_threadsafe(event.set)
             raise sd.CallbackStop
+        # These next fill the buffer - originally from a larger
+        # precomputed WAV buffer, but here we want to copy data in
+        # whenever a stimulus-gating event is set():
+        # outdata[:] = 0
+
+        # Something like this - if an event is triggered, copy its
+        # waveform, otherwise default to 0.  Ideally we would wait(),
+        # but with multiple events we would risk blocking.  Right now,
+        # evd is a dictionary.  Can we turn it into an event class?
         valid_frames = frame_count if remainder >= frame_count else remainder
-        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
+        end = idx + valid_frames
+        for x in gating_events:
+            if x.is_set():
+                #x.copybuf(outdata) buffer has been allocated to cover
+                # the whole session.  As soon as an event x has been
+                # set(), copy its waveform into the stim buffer:
+                
+                x.add_into_buffer(buffer[idx:])
+                x.clear()
+
+        # Whatever happened, happened.  Now copy the results into the
+        # output buffer:
+        outdata[:valid_frames] = buffer[idx:end]
         outdata[valid_frames:] = 0
         idx += valid_frames
 
     #await asyncio.sleep(3)
     print("Callback defined.  Opening audio stream (type={})".format(buffer.dtype))
-    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
-                             channels=1, blocksize=8192, **kwargs)
+    stream = sd.OutputStream(samplerate=evd['stimulus_sample_rate'],
+                             callback=callback,
+                             dtype=buffer.dtype,
+                             channels=1,
+                             blocksize=8192,
+                             **kwargs)
     #if first:
     #    await sync.wait()
     #    first = False
@@ -446,32 +532,6 @@ async def play_buffer(buffer, **kwargs):
 #    with stream:
 #        await event.wait()
 
-def play_buffer2(buffer, **kwargs):
-    if buffer is None:
-        return None
-
-    print("Setting up audio stream")
-    idx = 0
-
-    def callback(outdata, frame_count, time_info, status):
-        nonlocal idx
-        if status:
-            print(status)
-        remainder = len(buffer) - idx
-        if remainder == 0:
-            raise sd.CallbackStop()
-        valid_frames = frame_count if remainder >= frame_count else remainder
-        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
-        outdata[valid_frames:] = 0
-        idx += valid_frames
-
-    print("Callback defined.  Opening audio stream")
-    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
-                             channels=1, blocksize=8192, **kwargs)
-    print("Stream opened: ", stream)
-    return stream
-
-
 
 ## Aynchronous task to start the data stream for ECG ##
 async def run(client, debug=False):
@@ -479,7 +539,8 @@ async def run(client, debug=False):
     ## Writing chracterstic description to control point for request of UUID (defined above) ##
 
     # Should this look anything like the ECG stream?
-    
+
+
     await client.is_connected()
     print("---------Device connected--------------")
 
@@ -499,15 +560,20 @@ async def run(client, debug=False):
     ## ECG stream started
     await client.start_notify(PMD_DATA, data_conv)
 
-    # if wave_buffer here is None and gating_events is a list, then we
-    # should have a separate function that waits for gating events and
-    # calls play_buffer when needed.
+    print(f"in run: wave_buffer length = {len(wave_buffer)}")
+
+    # By default, wave_buffer is quiet (0), but will be filled on
+    # demand with stim where events are triggered.  Side benefit: we
+    # can save wave_buffer to see how events got triggered.
 
     # How can we modify this to stimulate conditional on events?
     playback_event, playback_stream = await play_buffer(wave_buffer)
     # Perhaps play_buffer can check for events and deal with it that
     # way.  play_buffer would have to have a list or dict of wav
     # buffers to be used when conditions arise.
+
+    print(f"Playback event: {playback_event}")
+    print(f"Playback stream: {playback_stream}")
 
     print("Collecting ECG data...")
 
@@ -532,7 +598,7 @@ async def run(client, debug=False):
     print("Stopping ECG data...")
     print("[CLOSED] application closed.")
 
-    save_and_process(ecg_session_data, record_name)
+    save_and_process(ecg_session_data, collection_name)
 
     quit()
     # sys.exit(0)
