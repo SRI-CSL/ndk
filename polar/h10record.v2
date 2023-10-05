@@ -1,0 +1,453 @@
+#!/usr/bin/env python
+#    /usr/local/bin/python3
+
+
+# Script for stimulus synthesis, playback and ECG recording from Polar
+# H10 chest strap: This really belongs in NDE as opposed to NDK.
+
+import os
+import sys
+import math
+import time
+import wfdb
+import shutil
+import signal
+import asyncio
+import os.path
+import subprocess
+import numpy as np
+import nde.gen
+import nde.ssread
+import nde.stim as stim
+import scipy.io.wavfile
+from ndk.ds import wfdb_to_nbf
+
+import pandas as pd
+from bleak import BleakClient
+from bleak.uuids import uuid16_dict
+import sounddevice as sd
+
+state_machine = None
+
+class cardiacPeakEvent(asyncio.Event):
+    def __init__(self, stim_name):
+        super().__init__()
+        self.stim_name = stim_name
+
+# the ECG collector is the caller and sets the cardiacPeakEvent when a
+# peak is detected or a threshold is exceeded.  The play_buffer
+# routine checks this event and when set, emits an event-gated stim
+# signal.
+
+def ss_to_wav(ssfile, force=False):
+    global state_machine
+    state_machine = nde.ssread.ssread(ssfile)
+    nsecs = state_machine.duration
+    nminutes = nsecs / 60
+    print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
+    seq = nde.gen.gen_sequence(state_machine)
+    #for x in seq:
+    #    print(x)
+    wavfile = ssfile[:-3] + ".wav"
+    if os.path.exists(wavfile) and not force:
+        print("Re-using wav file for stimulus: {}".format(wavfile))
+    else:
+        print("Generating wav file for stimulus in {}".format(wavfile))
+        stream = stim.WAV_out(wavfile, samprate=state_machine.stim_samprate)
+        tprev = 0
+        sampnum = 0
+        for i in range(len(seq)):
+            time, amp, wave = seq[i]
+            if i > 0:
+                delta = int ( stream.samprate * (time - tprev) )
+            else:
+                delta = 0
+            sampnum = stim.put_spike( stream, wave, delta, sampnum, scale=amp )
+            tprev = time
+   
+        stream.put_sample(0.0, finish=True)
+        stream.close()
+        print("...Done.")
+    return wavfile
+
+
+if (len(sys.argv) == 1):
+    print("Usage: h10record <collection_dir> [<ss_file> [events_out]]")
+    exit()
+
+if (len(sys.argv) > 1):
+    record_name = sys.argv[1]
+    pair = record_name.split('.')
+    # These cases reflect the case where a stim script is to be
+    # converted to a wav file:
+    if pair[-1] == 'ss':
+        ssfile = record_name
+        print(f"Translating ss to wav: {ssfile}")
+        wavfile = ss_to_wav(ssfile, force=True)
+        quit()
+    elif pair[-1] == 'py':
+        pyfile = record_name
+        subprocess.run(pyfile)
+        quit()
+    else:
+        record_name = sys.argv[1]
+        print("Sending data to {}".format(sys.argv[1]))
+
+if (len(sys.argv) > 2):
+    if sys.argv[2].isdigit():
+        nminutes = int(sys.argv[2])
+        nsecs = nminutes * 60
+        print("Recording for {} minutes (= {} seconds = {} ticks).".format(nminutes, nsecs, nsecs*130))
+        wave_buffer = None
+    else:
+        ssfile = sys.argv[2]
+        info = ssfile.split('.')
+        print(info[-1])
+        if info[-1] == 'ss':
+            wavfile = ss_to_wav(ssfile)
+            if len(sys.argv) > 3:
+                # Just list the events
+                print(f"Saving state event info in {sys.argv[3]}")
+                state_machine.save_events( sys.argv[3] , sql=True)
+                quit()
+        elif info[-1] == 'py':
+            # Python stim scripts always save events in sql format.
+            subprocess.run(ssfile)
+            wavfile = info[0] + '.wav'
+        else:
+            wavfile = ssfile
+            print("Using precomputed WAV file: ", wavfile)
+        sr,wave_buffer = scipy.io.wavfile.read(wavfile)
+        print(wave_buffer.shape)
+        # What if the wav file has 2 channels?
+        wave_buffer = wave_buffer.reshape( ( len(wave_buffer), 1) )
+
+
+""" Predefined UUID (Universal Unique Identifier) mapping are based on Heart Rate GATT service Protocol that most
+Fitness/Heart Rate device manufacturer follow (Polar H10 in this case) to obtain a specific response input from 
+the device acting as an API """
+
+uuid16_dict = {v: k for k, v in uuid16_dict.items()}
+
+## This is the device MAC ID, please update with your device ID
+# ADDRESS = "D4:52:48:88:EA:04"
+#
+#
+# Not sure, but it looks as if these addresses are dependent on both
+# the device (H10) and the host (CIC CSL Laptop)!
+#
+# Really need to figure out how to detect and use any old Polar H10:
+#ADDRESS = "61819F2C-AE8F-4F05-BB0F-E9A541D103A7"
+#ADDRESS = "293C33D4-2140-4D68-B85A-F5495CDA6D6C"
+ADDRESS = "12B92F7F-2250-490D-8B99-D69912619B37"  # Polar H10 78F5B92F -45
+ADDRESS = "E9277C23-100C-4219-A3A0-E34C9195C22A"  # Polar H10 AFEBBC25 -50
+## UUID for model number ##
+MODEL_NBR_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
+    uuid16_dict.get("Model Number String")
+)
+
+
+## UUID for manufacturer name ##
+MANUFACTURER_NAME_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
+    uuid16_dict.get("Manufacturer Name String")
+)
+
+## UUID for battery level ##
+BATTERY_LEVEL_UUID = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(
+    uuid16_dict.get("Battery Level")
+)
+
+## UUID for connection establsihment with device ##
+PMD_SERVICE = "FB005C80-02E7-F387-1CAD-8ACD2D8DF0C8"   # (PMD_SERVICE_UUID)
+
+## UUID for Request of stream settings ##
+PMD_CONTROL = "FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8"   # (PMD_CHAR1_UUID)
+
+## UUID for Request of start stream ##
+PMD_DATA = "FB005C82-02E7-F387-1CAD-8ACD2D8DF0C8"      # (PMD_CHAR2_UUID)
+
+## UUID for Request of ECG Stream ##
+ECG_WRITE = bytearray([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00])
+
+## For Plolar H10  sampling frequency ##
+ECG_SAMPLING_FREQ = 130
+
+time_0 = -1
+psec = 0
+ecg_session_data = []
+ecg_session_time = []
+
+sync = asyncio.Event()
+sync.clear()
+first = True
+datestamp = time.ctime(time.time())
+
+
+#
+# Need to get our time act together.  NDK .db files will only store
+# samplenums relative to the start of the recording.  The file name is
+# used as a kind of datestamp.  See the NDK TODO file for more info.
+#
+
+def save_signal(data, name):
+    p_signal = np.asarray(data, dtype=np.float64)
+    n = len(data)
+    p_signal = p_signal.reshape((n,1))
+    print(p_signal)
+    record_name = name
+    dat_file_name = ['{}.dat'.format(name)]
+    units = ['qV']
+    fmt = ['16']
+    adc_gain = [1]
+    baseline = [0]
+    samps_per_frame = [1]
+
+    rec = wfdb.io.wrsamp(name,
+                         fs=130,
+                         p_signal = p_signal,
+                         units=units,
+                         sig_name=['V1'],
+                         fmt = fmt)
+    return(rec)
+
+def save_and_process(data, name, channels=['V1']):
+    global state_machine
+    save_signal(data, name)
+    src_hdr = name + '.hea'
+    src_dat = name + '.dat'
+    to_dir = './'+name+'/'
+    print("Saving wfdb record {} to directory {}.".format(name, to_dir))
+    wfdb_to_nbf(name, to_dir, ['V1'], date=datestamp)
+    os.system("cp {} {}".format(ssfile, to_dir))
+    # shutil.copyfile(ssfile, to_dir)
+    print("Saving a copy of wfdb header file {} to {}".format(src_hdr, to_dir))
+    os.system("cp {} {}".format(src_hdr, to_dir))
+    # shutil.copyfile(src_hdr, to_dir)
+    print("Saving a copy of wfdb data file {} to {}".format(src_dat, to_dir))
+    os.system("cp {} {}".format(src_dat, to_dir))
+    # shutil.copyfile(src_dat, to_dir)
+    print("Saving state machine events to file {}.".format(to_dir+'events.dat'))
+    state_machine.save_events( to_dir+'events.dat' )
+
+
+## Positoning/Pinnning the real-time plot window on the screen
+#def move_figure(f, x, y):
+#    """Move figure's upper left corner to pixel (x, y)"""
+#    backend = matplotlib.get_backend()
+#    if backend == "TkAgg":
+#        f.canvas.manager.window.wm_geometry("+%d+%d" % (x, y))
+#    elif backend == "WXAgg":
+#        f.canvas.manager.window.SetPosition((x, y))
+#    else:
+#        # This works for QT and GTK
+#        # You can also use window.setGeometry
+#        f.canvas.manager.window.move(x, y)
+
+
+## Keyboard Interrupt Handler
+def keyboardInterrupt_handler(signum, frame):
+    global playback_event   # this sucks
+    print("  key board interrupt received...")
+    print("----------------Recording stopped------------------------")
+    if playback_event:
+        playback_event.set()
+    else:
+        # This is just a timed collect with no playback, so save and exit:
+        save_and_process(ecg_session_data, record_name)
+        # sys.exit(0)
+        quit()
+
+discard = -1 # 130 * 60
+npts = 0
+
+## Bit conversion of the Hexadecimal stream - here is where we could
+## detect signal events and issue stim. events:
+def data_conv(sender, data):
+    global psec, time_0, sync, first, discard, npts
+    sync.set()
+    if data[0] == 0x00:
+        timestamp = convert_to_unsigned_long(data, 1, 8)
+        step = 3
+        samples = data[10:]
+        offset = 0
+        sec = int(timestamp / 1000000000)
+        if time_0 == -1:
+            time_0 = sec
+        if sec > psec:
+            print(sec-time_0, end=' ')
+            sys.stdout.flush()
+            psec = sec
+        while offset < len(samples):
+            ecg = convert_array_to_signed_int(samples, offset, step)
+            offset += step
+            npts += len(samples)
+            if npts < discard:
+                psec = sec
+                print('dropping')
+            else:
+                ecg_session_data.extend([ecg])
+                ecg_session_time.extend([timestamp])
+
+
+def convert_array_to_signed_int(data, offset, length):
+    return int.from_bytes(
+        bytearray(data[offset : offset + length]), byteorder="little", signed=True,
+    )
+
+
+def convert_to_unsigned_long(data, offset, length):
+    return int.from_bytes(
+        bytearray(data[offset : offset + length]), byteorder="little", signed=False,
+    )
+
+
+ 
+async def play_buffer(buffer, **kwargs):
+    global sync, first
+
+    loop = asyncio.get_event_loop()
+    idx = 0
+    event = asyncio.Event()
+
+    if buffer is None:
+        print("No buffer, will perform a timed recording.")
+        return event, None
+
+    print("Setting up audio stream")
+
+    # Conditional stim probably needs to live here:
+    def callback(outdata, frame_count, time_info, status):
+        nonlocal idx
+        if status:
+            print(status)
+        remainder = len(buffer) - idx
+        if remainder == 0:
+            loop.call_soon_threadsafe(event.set)
+            raise sd.CallbackStop
+        valid_frames = frame_count if remainder >= frame_count else remainder
+        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
+        outdata[valid_frames:] = 0
+        idx += valid_frames
+
+    #await asyncio.sleep(3)
+    print("Callback defined.  Opening audio stream (type={})".format(buffer.dtype))
+    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
+                             channels=1, blocksize=8192, **kwargs)
+    #if first:
+    #    await sync.wait()
+    #    first = False
+    print("Stream opened: ", stream)
+    
+    # We will want to await this to wait for playback to reach the end of the buffer:
+    return event, stream
+# We want this to run concurrently
+#    with stream:
+#        await event.wait()
+
+def play_buffer2(buffer, **kwargs):
+    if buffer is None:
+        return None
+
+    print("Setting up audio stream")
+    idx = 0
+
+    def callback(outdata, frame_count, time_info, status):
+        nonlocal idx
+        if status:
+            print(status)
+        remainder = len(buffer) - idx
+        if remainder == 0:
+            raise sd.CallbackStop()
+        valid_frames = frame_count if remainder >= frame_count else remainder
+        outdata[:valid_frames] = buffer[idx:idx + valid_frames]
+        outdata[valid_frames:] = 0
+        idx += valid_frames
+
+    print("Callback defined.  Opening audio stream")
+    stream = sd.OutputStream(samplerate=sr, callback=callback, dtype=buffer.dtype,
+                             channels=1, blocksize=8192, **kwargs)
+    print("Stream opened: ", stream)
+    return stream
+
+
+
+## Aynchronous task to start the data stream for ECG ##
+async def run(client, debug=False):
+    global playback_event
+    ## Writing chracterstic description to control point for request of UUID (defined above) ##
+
+    # Should this look anything like the ECG stream?
+    
+    await client.is_connected()
+    print("---------Device connected--------------")
+
+    model_number = await client.read_gatt_char(MODEL_NBR_UUID)
+    print("Model Number: {0}".format("".join(map(chr, model_number))))
+
+    manufacturer_name = await client.read_gatt_char(MANUFACTURER_NAME_UUID)
+    print("Manufacturer Name: {0}".format("".join(map(chr, manufacturer_name))))
+
+    battery_level = await client.read_gatt_char(BATTERY_LEVEL_UUID)
+    print("Battery Level: {0}%".format(int(battery_level[0])))
+
+    att_read = await client.read_gatt_char(PMD_CONTROL)
+
+    await client.write_gatt_char(PMD_CONTROL, ECG_WRITE)
+
+    ## ECG stream started
+    await client.start_notify(PMD_DATA, data_conv)
+
+    # How can we modify this to stimulate conditional on events?
+    playback_event, playback_stream = await play_buffer(wave_buffer)
+    # Perhaps play_buffer can check for events and deal with it that
+    # way.  play_buffer would have to have a list or dict of wav
+    # buffers to be used when conditions arise.
+
+    print("Collecting ECG data...")
+
+    n = ECG_SAMPLING_FREQ
+
+    ## Collecting ECG data for nsecs seconds
+    if playback_stream is None:
+        print("Performing timed collection (no audio stream)...")
+        await asyncio.sleep(nsecs)
+        print("...")
+        print("We ran for {} seconds.  Stopping collection.".format(nsecs))
+    else:
+        # End of playback == end of experiment:
+        with playback_stream:
+            await playback_event.wait()
+        playback_stream.close()
+        print("...")
+        print("Reached the end of the stimulus program.  Stopping collection.")
+
+    ## Stop the stream once data is collected
+    await client.stop_notify(PMD_DATA)
+    print("Stopping ECG data...")
+    print("[CLOSED] application closed.")
+
+    save_and_process(ecg_session_data, record_name)
+
+    quit()
+    # sys.exit(0)
+
+
+async def main():
+    try:
+        async with BleakClient(ADDRESS) as client:
+            signal.signal(signal.SIGINT, keyboardInterrupt_handler)
+            tasks = [
+                asyncio.ensure_future(run(client, True)),
+                
+            ]
+
+            await asyncio.gather(*tasks)
+    except:
+        pass
+
+
+if __name__ == "__main__":
+    os.environ["PYTHONASYNCIODEBUG"] = str(1)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
