@@ -112,8 +112,12 @@ if (len(sys.argv) > 2):
                 quit()
         elif info[-1] == 'py':
             # Python stim scripts always save events in sql format.
-            subprocess.run(ssfile)
+            # This next will run the stimlet script.  This will create
+            # a new WAV file if necessary, which we can then use for
+            # stim while recording ECG:
+            subprocess.run(["python", ssfile])
             wavfile = info[0] + '.wav'
+            print(f"Using generated stim file: {wavfile}")
         else:
             wavfile = ssfile
             print("Using precomputed WAV file: ", wavfile)
