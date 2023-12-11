@@ -17,7 +17,7 @@ setup(name='ndk',
           'joblib',  # wtf?
 #          'sqlite3',
           'PyMySQL',
-          'sklearn',
+          'scikit-learn',
           'uritools',
           'pyOpenGL',
           'quantities',
