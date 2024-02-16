@@ -12,7 +12,7 @@ setup(name='ndk',
           'cqlsh',
           'numpy',
           'scipy',
-		  'pandas',
+	  'pandas',
           'seaborn',
           'joblib',  # wtf?
 #          'sqlite3',
