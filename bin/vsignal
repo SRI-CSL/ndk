@@ -59,6 +59,7 @@ class Beats:
         self.id_from_samplenum = {}
         self.samplenum_from_id = {}
         self.intervals = []
+        interval = 1
         if channel:
             event_store.execute('select spiketimes.spikeid,spiketimes.samplenum from spiketimes join spikechannels  where spiketimes.spikeid = spikechannels.spikeid and spikechannels.channel = {} order by spiketimes.samplenum'.format(channel))
         else:
@@ -80,7 +81,8 @@ class Beats:
                 n += 1
             tprev = tcur
                 
-        self.mean_interval = float(mean) / float(n)
+        d = 1.0 if n==0 else float(n)
+        self.mean_interval = float(mean) / d
         print("Mean beat interval = {} samples.")
         self.anomalies = []
         self.intervals += [ (interval,tcur) ]
@@ -752,7 +754,7 @@ ax.set_yticks(ax.get_yticks()[::2])
 #line1, = ax.plot(plot.x, color='blue')
 fig = plt.gcf()
 namestring = os.path.split(dbname)[-1]
-fig.canvas.set_window_title(namestring)
+fig.canvas.manager.set_window_title(namestring)
 #fig.canvas.mpl_connect('pick_event', on_pick)
 channel_list = [int(x) for x in ns.channel.split(',')]
 iprint('Channel list: {}'.format(channel_list))
